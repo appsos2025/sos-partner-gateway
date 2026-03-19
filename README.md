@@ -57,7 +57,7 @@ Ogni portale ha la propria chiave, propri partner e propri log — tutto isolato
 - `start_date`, `start_time`
 - `total`
 - `customer_email`
-- `partner_field` (nome campo LatePoint configurabile nelle impostazioni, default `cf_910bA88i`)
+- `location_id` (ID della posizione LatePoint associata al partner, usato per differenziare i partner)
 - Logging: `BOOKING_PARTNER_HOOK`, `WEBHOOK_PARTNER_SENT`, `WEBHOOK_PARTNER_FAIL`, `WEBHOOK_PARTNER_SKIP_NO_URL`.
 
 ## Callback pagamento
@@ -71,9 +71,23 @@ Ogni portale ha la propria chiave, propri partner e propri log — tutto isolato
 - Effetto: aggiorna la prenotazione LatePoint con `status = payment_success_status` (default `pending`) e `payment_status = paid`, logga `PAYMENT_CALLBACK_OK`.
 
 ## Tracciamento partner nei booking
-- Durante la creazione prenotazione vengono scritti i meta LatePoint con il campo configurato (default `cf_910bA88i`) e `partner_id` con il valore del partner corrente.
-- Il campo LatePoint è configurabile da **Impostazioni → Campo LatePoint partner** per adattarsi a installazioni diverse.
+- Durante la creazione prenotazione vengono scritti i meta LatePoint `partner_id` e `partner_location_id` con il valore del partner e della posizione LatePoint corrente.
+- La differenziazione tra partner è gestita tramite le **posizioni LatePoint** (`location_id`): ogni partner ha una posizione dedicata.
 - I cookie `sos_pg_partner_id` mantengono il partner se la sessione WordPress scade prima del checkout LatePoint.
 
-## Tool di test (partner-login-tester)
-Nella cartella `tools/partner-login-tester/` è disponibile un secondo plugin WordPress da installare sul **sito del partner** per simulare login, ricevere webhook e inviare callback di pagamento. Utile in fase di sviluppo/integrazione; non installare in produzione.
+## Tool di test e integrazione
+
+### plugin-login-tester (WordPress)
+Nella cartella `tools/partner-login-tester/` è disponibile un plugin WordPress da installare sul sito del partner per:
+- Simulare il login firmato verso il gateway
+- Ricevere webhook `booking_created` e visualizzarli
+- Confermare il pagamento con un click direttamente dall'ultimo webhook ricevuto
+Utile in fase di sviluppo/integrazione; non installare in produzione.
+
+### integration-example (standalone, senza WordPress)
+Nella cartella `tools/integration-example/` è disponibile un esempio PHP standalone per partner che **non usano WordPress**:
+- Riceve e verifica il webhook `booking_created`
+- Mostra una dashboard con le prenotazioni ricevute
+- Permette di confermare il pagamento con un click (invia il callback HMAC al gateway)
+- Include esempi per Node.js, Python e curl
+Adatta questo esempio alla tua piattaforma preferita.

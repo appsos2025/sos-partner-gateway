@@ -32,7 +32,7 @@ partner_id|payload|timestamp|nonce
   - partner_id, booking_id, status
   - service_id, start_date, start_time, total
   - customer_email
-  - partner_field = nome campo LatePoint configurato nelle impostazioni (default cf_910bA88i)
+  - location_id = ID della posizione LatePoint associata al partner
 
 ## Callback pagamento (dal partner al gateway)
 - Endpoint: /partner-payment-callback (slug configurabile nelle impostazioni)
