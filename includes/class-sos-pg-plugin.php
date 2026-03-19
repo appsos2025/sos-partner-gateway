@@ -29,10 +29,15 @@ class SOS_PG_Plugin {
         add_action('admin_menu', [$this, 'admin_menu']);
         add_action('add_meta_boxes', [$this, 'register_partner_page_metabox']);
         add_action('save_post_page', [$this, 'save_partner_page_meta'], 10, 2);
+        add_action('admin_notices', [$this, 'admin_notice_missing_key']);
 
         add_action('init', [$this, 'handle_partner_login'], 1);
+        add_action('init', [$this, 'handle_book_now_request'], 1);
         add_action('template_redirect', [$this, 'protect_partner_pages'], 1);
         add_action('init', [$this, 'handle_payment_callback'], 1);
+
+        // Shortcode [sos_partner_prenota] per embed booking button su portali propri.
+        add_shortcode('sos_partner_prenota', [$this, 'shortcode_partner_prenota']);
 
         add_action('admin_post_sos_pg_unlock_ip', [$this, 'handle_unlock_ip']);
         add_action('admin_post_sos_pg_save_settings', [$this, 'handle_save_settings']);
@@ -91,13 +96,30 @@ class SOS_PG_Plugin {
                 'ban_long_minutes' => 1440,
                 'window_short_minutes' => 10,
                 'window_long_minutes' => 1440,
-                'public_key_pem' => "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7vF+KsTzI/Gn8jNxQViHyZV26iS/\nhI1seVH4oxEBapmL5cJLC9EZOq3cgmmfGfrM9h1qjTXtKd7yjJpb2wUwXg==\n-----END PUBLIC KEY-----",
+                'public_key_pem' => '',
                 'enable_latepoint_discount_hooks' => 0,
                 'payment_callback_slug' => 'partner-payment-callback',
                 'payment_callback_secret' => '',
                 'payment_success_status' => 'pending',
+                'self_login_private_key_pem' => '',
+                'self_login_partner_id' => '',
             ]);
         }
+    }
+
+    public function admin_notice_missing_key() {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+        if (trim((string) $this->get_settings()['public_key_pem']) !== '') {
+            return;
+        }
+        $url = admin_url('admin.php?page=sos-partner-gateway-settings');
+        echo '<div class="notice notice-warning is-dismissible"><p>';
+        echo '<strong>SOS Partner Gateway</strong>: nessuna chiave pubblica ECC configurata. ';
+        echo 'Il login partner non funzioner&agrave; finch&eacute; non viene impostata una chiave in ';
+        echo '<a href="' . esc_url($url) . '">Impostazioni &rarr; Chiave pubblica PEM</a>.';
+        echo '</p></div>';
     }
 
     private function get_settings() {
@@ -111,11 +133,13 @@ class SOS_PG_Plugin {
             'ban_long_minutes' => 1440,
             'window_short_minutes' => 10,
             'window_long_minutes' => 1440,
-            'public_key_pem' => "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7vF+KsTzI/Gn8jNxQViHyZV26iS/\nhI1seVH4oxEBapmL5cJLC9EZOq3cgmmfGfrM9h1qjTXtKd7yjJpb2wUwXg==\n-----END PUBLIC KEY-----",
+            'public_key_pem' => '',
             'enable_latepoint_discount_hooks' => 0,
             'payment_callback_slug' => 'partner-payment-callback',
             'payment_callback_secret' => '',
             'payment_success_status' => 'pending',
+            'self_login_private_key_pem' => '',
+            'self_login_partner_id' => '',
         ];
 
         $settings = get_option($this->settings_key, []);
@@ -739,6 +763,9 @@ class SOS_PG_Plugin {
         echo '<tr><th>Slug callback pagamento partner</th><td><input type="text" class="regular-text" name="payment_callback_slug" value="' . esc_attr($settings['payment_callback_slug']) . '" placeholder="partner-payment-callback"><p class="description">Percorso chiamato dal partner per confermare il pagamento.</p></td></tr>';
         echo '<tr><th>Secret callback pagamento</th><td><input type="text" class="regular-text" name="payment_callback_secret" value="' . esc_attr($settings['payment_callback_secret']) . '" placeholder="secret condiviso"></td></tr>';
         echo '<tr><th>Stato di successo pagamento</th><td><input type="text" class="regular-text" name="payment_success_status" value="' . esc_attr($settings['payment_success_status']) . '" placeholder="attesa_partner"><p class="description">Slug dello stato da impostare quando il partner conferma il pagamento (es. attesa_partner).</p></td></tr>';
+        echo '<tr><th colspan="2"><hr style="margin:4px 0;"><strong>Shortcode [sos_partner_prenota] — uso self-service</strong><p class="description" style="font-weight:normal;">Usato quando vuoi inserire un pulsante "Prenota" direttamente su una pagina di questo sito senza un portale partner esterno. La chiave privata qui sotto firma la richiesta di login.</p></th></tr>';
+        echo '<tr><th>Partner ID self-use</th><td><input type="text" class="regular-text" name="self_login_partner_id" value="' . esc_attr($settings['self_login_partner_id']) . '" placeholder="hf"><p class="description">Partner ID di default per lo shortcode quando non specificato nell\'attributo.</p></td></tr>';
+        echo '<tr><th>Chiave privata self-use (PEM)</th><td><textarea class="large-text code" rows="10" name="self_login_private_key_pem" placeholder="-----BEGIN PRIVATE KEY-----">' . esc_textarea($settings['self_login_private_key_pem']) . '</textarea><p class="description">Chiave privata ECC per firmare le richieste generate dallo shortcode. <strong>Deve corrispondere alla chiave pubblica configurata sopra.</strong></p></td></tr>';
         echo '</table>';
         submit_button('Salva impostazioni');
         echo '</form></div>';
@@ -894,6 +921,8 @@ class SOS_PG_Plugin {
         $settings['payment_callback_slug'] = sanitize_title(wp_unslash($_POST['payment_callback_slug'] ?? 'partner-payment-callback'));
         $settings['payment_callback_secret'] = sanitize_text_field(wp_unslash($_POST['payment_callback_secret'] ?? ''));
         $settings['payment_success_status'] = sanitize_text_field(wp_unslash($_POST['payment_success_status'] ?? 'pending')) ?: 'pending';
+        $settings['self_login_private_key_pem'] = trim((string) wp_unslash($_POST['self_login_private_key_pem'] ?? ''));
+        $settings['self_login_partner_id'] = sanitize_text_field(wp_unslash($_POST['self_login_partner_id'] ?? ''));
 
         update_option($this->settings_key, $settings);
 
@@ -1125,6 +1154,169 @@ class SOS_PG_Plugin {
         exit;
     }
 
+    public function handle_book_now_request() {
+        if (!isset($_GET['sos_pg_book_now'])) {
+            return;
+        }
+
+        if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
+            status_header(405);
+            exit('Metodo non consentito');
+        }
+
+        // Verifica nonce prima di qualsiasi elaborazione per prevenire CSRF.
+        check_admin_referer('sos_pg_book_now');
+
+        $settings = $this->get_settings();
+        $pem = trim((string) ($settings['self_login_private_key_pem'] ?? ''));
+        $default_partner_id = sanitize_text_field((string) ($settings['self_login_partner_id'] ?? ''));
+
+        $email = sanitize_email(wp_unslash($_POST['sos_pg_email'] ?? ''));
+        $partner_id = sanitize_text_field(wp_unslash($_POST['sos_pg_partner_id'] ?? ''));
+        if ($partner_id === '') {
+            $partner_id = $default_partner_id;
+        }
+
+        // Fallback: se l'utente è già loggato usa la sua email.
+        if ($email === '' && is_user_logged_in()) {
+            $email = wp_get_current_user()->user_email;
+        }
+
+        if ($email === '' || !is_email($email)) {
+            wp_safe_redirect(add_query_arg('sos_pg_err', 'email', wp_get_referer() ?: home_url('/')));
+            exit;
+        }
+
+        if ($partner_id === '') {
+            wp_safe_redirect(add_query_arg('sos_pg_err', 'partner', wp_get_referer() ?: home_url('/')));
+            exit;
+        }
+
+        if ($pem === '') {
+            wp_safe_redirect(add_query_arg('sos_pg_err', 'key', wp_get_referer() ?: home_url('/')));
+            exit;
+        }
+
+        $private_key = openssl_pkey_get_private($pem);
+        if (!$private_key) {
+            wp_safe_redirect(add_query_arg('sos_pg_err', 'key', wp_get_referer() ?: home_url('/')));
+            exit;
+        }
+
+        $timestamp = time();
+        $nonce = wp_generate_password(12, false, false);
+        $message = $partner_id . '|' . $email . '|' . $timestamp . '|' . $nonce;
+
+        $signature_raw = '';
+        $ok = openssl_sign($message, $signature_raw, $private_key, OPENSSL_ALGO_SHA256);
+        openssl_free_key($private_key);
+
+        if (!$ok) {
+            wp_safe_redirect(add_query_arg('sos_pg_err', 'sign', wp_get_referer() ?: home_url('/')));
+            exit;
+        }
+
+        $signature_b64 = base64_encode($signature_raw);
+        $endpoint = home_url($this->current_endpoint_path() . '/');
+
+        // Generiamo una pagina HTML che fa auto-POST al partner-login (stesso pattern del tester).
+        status_header(200);
+        echo '<!DOCTYPE html><html lang="it"><head><meta charset="UTF-8"><title>Prenota...</title></head><body>';
+        echo '<form id="sosPgBookNowForm" action="' . esc_url($endpoint) . '" method="POST">';
+        echo '<input type="hidden" name="partner_id" value="' . esc_attr($partner_id) . '">';
+        echo '<input type="hidden" name="payload" value="' . esc_attr($email) . '">';
+        echo '<input type="hidden" name="timestamp" value="' . esc_attr((string) $timestamp) . '">';
+        echo '<input type="hidden" name="nonce" value="' . esc_attr($nonce) . '">';
+        echo '<input type="hidden" name="signature" value="' . esc_attr($signature_b64) . '">';
+        echo '</form>';
+        echo '<script>document.getElementById("sosPgBookNowForm").submit();</script>';
+        echo '</body></html>';
+        exit;
+    }
+
+    /**
+     * Shortcode [sos_partner_prenota] per inserire un pulsante "Prenota" su qualsiasi pagina WP.
+     *
+     * Attributi:
+     *   partner_id  — ID partner; se omesso usa self_login_partner_id dalle impostazioni
+     *   label       — testo pulsante (default: "Prenota")
+     *   email_field — "yes" mostra un campo email; "no" usa direttamente l'email dell'utente loggato (default: "yes" se non loggato, "no" se loggato)
+     *   class       — classi CSS aggiuntive sul form
+     *
+     * Esempio: [sos_partner_prenota partner_id="hf" label="Prenota ora"]
+     */
+    public function shortcode_partner_prenota($atts) {
+        $settings = $this->get_settings();
+        $default_partner_id = sanitize_text_field((string) ($settings['self_login_partner_id'] ?? ''));
+
+        $atts = shortcode_atts([
+            'partner_id'  => $default_partner_id,
+            'label'       => 'Prenota',
+            'email_field' => is_user_logged_in() ? 'no' : 'yes',
+            'class'       => '',
+        ], $atts, 'sos_partner_prenota');
+
+        $partner_id = sanitize_text_field((string) $atts['partner_id']);
+        $label      = esc_html(sanitize_text_field((string) $atts['label']));
+        $show_email = strtolower(trim((string) $atts['email_field'])) === 'yes';
+        $extra_class = esc_attr(sanitize_text_field((string) $atts['class']));
+
+        $pem_configured = trim((string) ($settings['self_login_private_key_pem'] ?? '')) !== '';
+
+        if (!$pem_configured) {
+            if (current_user_can('manage_options')) {
+                return '<p style="color:#d63638;font-size:.85em;">[sos_partner_prenota] — Chiave privata self-use non configurata nelle impostazioni del gateway.</p>';
+            }
+            return '';
+        }
+
+        if ($partner_id === '') {
+            if (current_user_can('manage_options')) {
+                return '<p style="color:#d63638;font-size:.85em;">[sos_partner_prenota] — Partner ID non specificato.</p>';
+            }
+            return '';
+        }
+
+        $action_url = add_query_arg('sos_pg_book_now', '1', home_url('/'));
+
+        $uid = 'sos_pg_prenota_' . wp_generate_password(6, false, false);
+
+        $err_map = [
+            'email'   => 'Inserisci un indirizzo email valido.',
+            'partner' => 'Configurazione partner mancante. Contatta l\'amministratore.',
+            'key'     => 'Errore di configurazione chiave. Contatta l\'amministratore.',
+            'sign'    => 'Errore di firma. Contatta l\'amministratore.',
+        ];
+        $err_code = sanitize_text_field((string) ($_GET['sos_pg_err'] ?? ''));
+        $err_msg = $err_code !== '' ? ($err_map[$err_code] ?? 'Errore imprevisto.') : '';
+
+        ob_start();
+        ?>
+<form id="<?php echo esc_attr($uid); ?>" class="sos-partner-prenota<?php echo $extra_class !== '' ? ' ' . $extra_class : ''; ?>" method="post" action="<?php echo esc_url($action_url); ?>">
+    <?php wp_nonce_field('sos_pg_book_now'); ?>
+    <input type="hidden" name="sos_pg_partner_id" value="<?php echo esc_attr($partner_id); ?>">
+    <?php if ($show_email): ?>
+    <div class="sos-prenota-email-row" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <input type="email" name="sos_pg_email" placeholder="La tua email" required
+               style="padding:8px 12px;border:1px solid #ccc;border-radius:4px;font-size:1em;min-width:220px;">
+        <button type="submit"
+                style="padding:8px 20px;background:#0073aa;color:#fff;border:none;border-radius:4px;font-size:1em;cursor:pointer;"><?php echo $label; ?></button>
+    </div>
+    <?php else: ?>
+        <?php if (is_user_logged_in()): ?>
+        <input type="hidden" name="sos_pg_email" value="<?php echo esc_attr(wp_get_current_user()->user_email); ?>">
+        <?php endif; ?>
+        <button type="submit"
+                style="padding:8px 20px;background:#0073aa;color:#fff;border:none;border-radius:4px;font-size:1em;cursor:pointer;"><?php echo $label; ?></button>
+    <?php endif; ?>
+    <?php if ($err_msg !== ''): ?>
+    <p style="color:#d63638;font-size:.85em;margin-top:4px;"><?php echo esc_html($err_msg); ?></p>
+    <?php endif; ?>
+</form>
+        <?php
+        return ob_get_clean();
+    }
+
     public function handle_booking_created($booking, $cart = null) {
         $partner_id = $this->get_current_partner_id();
 
@@ -1139,6 +1331,7 @@ class SOS_PG_Plugin {
         $status = $this->safe_get($booking, 'status');
         $service_id = $this->safe_get($booking, 'service_id');
         $agent_id = $this->safe_get($booking, 'agent_id');
+        $location_id = $this->safe_get($booking, 'location_id');
         $start_date = $this->safe_get($booking, 'start_date');
         $start_time = $this->safe_get($booking, 'start_time');
         $end_time = $this->safe_get($booking, 'end_time');
@@ -1162,6 +1355,7 @@ class SOS_PG_Plugin {
             'status' => $status,
             'service_id' => $service_id,
             'agent_id' => $agent_id,
+            'location_id' => $location_id,
             'start_date' => $start_date,
             'start_time' => $start_time,
             'end_time' => $end_time,
@@ -1171,10 +1365,14 @@ class SOS_PG_Plugin {
             'customer_name' => $customer_name,
         ];
 
-        // Salva l'id partner in meta LatePoint (cf_910bA88i e partner_id) per tracciamento/report.
-        if ($booking_id && $partner_id) {
-            $this->set_booking_meta($booking_id, 'cf_910bA88i', $partner_id);
-            $this->set_booking_meta($booking_id, 'partner_id', $partner_id);
+        // Salva partner_id e location_id in meta LatePoint per tracciamento/report.
+        if ($booking_id) {
+            if ($partner_id) {
+                $this->set_booking_meta($booking_id, 'partner_id', $partner_id);
+            }
+            if ($location_id) {
+                $this->set_booking_meta($booking_id, 'partner_location_id', $location_id);
+            }
         }
 
         // Webhook per-partner con payload minimo utile al pagamento.
@@ -1185,10 +1383,10 @@ class SOS_PG_Plugin {
             'status' => $status,
             'total' => $total,
             'service_id' => $service_id,
+            'location_id' => $location_id,
             'start_date' => $start_date,
             'start_time' => $start_time,
             'customer_email' => $customer_email,
-            'partner_field' => 'cf_910bA88i',
         ];
         $this->send_partner_webhook($partner_id, $partner_payload);
     }
