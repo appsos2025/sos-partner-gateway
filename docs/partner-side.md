@@ -32,7 +32,9 @@ partner_id|payload|timestamp|nonce
   - partner_id, booking_id, status
   - service_id, start_date, start_time, total
   - customer_email
-  - location_id = ID della posizione LatePoint associata al partner
+  - location_id = ID della location associata al partner nel sistema
+  - **partner_charge** (presente solo se `pay_on_partner = true`): importo che il partner deve incassare dal cliente
+  - **pay_on_partner** (presente solo se attivo): `true` = il pagamento avviene sul portale del partner
 
 ## Callback pagamento (dal partner al gateway)
 - Endpoint: /partner-payment-callback (slug configurabile nelle impostazioni)
@@ -42,35 +44,43 @@ partner_id|payload|timestamp|nonce
   - status (facoltativo, altrimenti usa quello configurato su WP)
   - transaction_id (facoltativo)
   - partner_id (facoltativo)
-- Effetto: imposta status = payment_success_status configurato e payment_status = paid su LatePoint.
+- Effetto: imposta status = payment_success_status configurato e payment_status = paid nel sistema di prenotazione.
+- **Il callback è richiesto SOLO quando `pay_on_partner = true`** (il partner gestisce il pagamento). Se il cliente ha pagato direttamente sul sito principale, il flusso si chiude automaticamente dopo il pagamento.
 
-## Flusso prenotazione gratuita (sconto 100%, total = 0)
+## Modalità di pagamento per partner
 
-Quando il partner ha uno sconto del 100%, il totale nel webhook sarà `total: 0`.
-In questo caso il pagamento avviene esclusivamente sul sito del partner (fuori dal gateway SOS),
-oppure non è richiesto affatto. **Il partner deve comunque inviare il callback di conferma** al gateway
-per aggiornare lo stato della prenotazione su LatePoint.
+### Pagamento sul sito principale (default)
+Il cliente paga tramite il checkout del sito principale. Nessun callback richiesto dal partner.
 
-Il file `tools/integration-example/webhook-receiver.php` gestisce automaticamente questo caso:
-se `total == 0`, invia il callback di conferma immediatamente alla ricezione del webhook.
+### Pagamento sul portale del partner (`pay_on_partner = true`)
+Il totale sul sito principale è impostato a 0 (il cliente non paga lì). Il webhook include:
+- `total: 0` — il sito principale non incassa
+- `partner_charge: <importo>` — l'importo che il partner deve incassare dal cliente
 
-Per implementare lo stesso comportamento sulla tua piattaforma:
+Il partner incassa il pagamento sulla propria piattaforma e invia il callback di conferma al gateway.
+
+### Prenotazione con sconto o gratuita
+Se è configurato uno sconto (fisso in € o percentuale %), il totale viene ridotto prima del checkout.
+Se il totale risultante è 0, il partner deve comunque inviare il callback per aggiornare lo stato.
 
 ```php
-// Alla ricezione del webhook
-if ((float)$data['total'] === 0.0) {
-    send_payment_confirmation($data['booking_id'], 'FREE-' . $data['booking_id'], $data['partner_id']);
+// Alla ricezione del webhook, gestione per prenotazione con pay_on_partner
+if (!empty($data['pay_on_partner'])) {
+    $amount_to_charge = $data['partner_charge'] ?? 0;
+    // ... gestisci il pagamento sulla tua piattaforma ...
+    // Dopo l'incasso, invia il callback:
+    send_payment_confirmation($data['booking_id'], 'TX-' . $data['booking_id'], $data['partner_id']);
 }
 ```
 
 ## Utilizzo centralizzato multi-portale (es. sospediatra.org)
 
-Il plugin supporta uno scenario in cui **un unico LatePoint centralizzato** riceve prenotazioni
-da portali diversi. Ogni portale ha un proprio `partner_id` e una propria **posizione LatePoint**
+Il plugin supporta uno scenario in cui **un unico sistema di prenotazione centralizzato** riceve prenotazioni
+da portali diversi. Ogni portale ha un proprio `partner_id` e una propria **location**
 (`location_id`) dedicata.
 
 Flusso:
-1. Il medico inserisce disponibilità su **un solo LatePoint** (es. su sospediatra.org)
+1. Il medico inserisce disponibilità in un solo posto (es. su sospediatra.org)
 2. Ogni portale partner (es. portale1.it, portale2.it) presenta un pulsante "Prenota"
 3. Al click: il portale costruisce un login firmato verso `/partner-login/` di sospediatra.org
 4. Il gateway autentica il partner, carica la pagina prenotazione giusta (location dedicata)
@@ -122,7 +132,7 @@ separato), è disponibile lo shortcode `[sos_partner_prenota]`.
 2. Il form fa POST a `/?sos_pg_book_now=1` (endpoint interno al plugin)
 3. Il plugin firma la richiesta con la chiave privata e fa auto-POST a `/partner-login/`
 4. Il gateway autentica → crea/aggiorna utente WP → redirige alla pagina booking del partner
-5. Il cliente completa la prenotazione su LatePoint
+5. Il cliente completa la prenotazione nel sistema
 
 ### Errori mostrati in-page (solo ad admin)
 - Chiave privata non configurata
