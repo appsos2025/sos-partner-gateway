@@ -1051,33 +1051,45 @@ class SOS_PG_Plugin {
         check_admin_referer('sos_pg_save_settings');
 
         $settings = $this->get_settings();
-        $settings['endpoint_slug'] = sanitize_title(wp_unslash($_POST['endpoint_slug'] ?? 'partner-login'));
-        $settings['courtesy_page_id'] = absint($_POST['courtesy_page_id'] ?? 0);
+
+        // Ruolo sito — determinato per primo per condizionare l'aggiornamento degli altri campi.
+        $new_role = sanitize_key(wp_unslash($_POST['site_role'] ?? 'main'));
+        $settings['site_role'] = in_array($new_role, ['main', 'partner'], true) ? $new_role : 'main';
+
+        // Campi comuni a entrambe le modalità.
         $settings['debug_logging_enabled'] = !empty($_POST['debug_logging_enabled']) ? 1 : 0;
-        $settings['max_fail_short'] = max(1, absint($_POST['max_fail_short'] ?? 10));
-        $settings['max_fail_long'] = max(1, absint($_POST['max_fail_long'] ?? 25));
-        $settings['ban_short_minutes'] = max(1, absint($_POST['ban_short_minutes'] ?? 60));
-        $settings['ban_long_minutes'] = max(1, absint($_POST['ban_long_minutes'] ?? 1440));
-        $settings['window_short_minutes'] = max(1, absint($_POST['window_short_minutes'] ?? 10));
-        $settings['window_long_minutes'] = max(1, absint($_POST['window_long_minutes'] ?? 1440));
-        $settings['public_key_pem'] = trim((string) wp_unslash($_POST['public_key_pem'] ?? ''));
-        $settings['payment_callback_slug'] = sanitize_title(wp_unslash($_POST['payment_callback_slug'] ?? 'partner-payment-callback'));
-        $settings['payment_callback_secret'] = sanitize_text_field(wp_unslash($_POST['payment_callback_secret'] ?? ''));
-        $settings['payment_success_status'] = sanitize_text_field(wp_unslash($_POST['payment_success_status'] ?? 'pending')) ?: 'pending';
         $settings['self_login_private_key_pem'] = trim((string) wp_unslash($_POST['self_login_private_key_pem'] ?? ''));
         $settings['self_login_partner_id'] = sanitize_text_field(wp_unslash($_POST['self_login_partner_id'] ?? ''));
         $settings['self_login_endpoint_url'] = esc_url_raw(trim((string) wp_unslash($_POST['self_login_endpoint_url'] ?? '')));
 
-        // Ruolo sito e impostazioni partner.
-        $new_role = sanitize_key(wp_unslash($_POST['site_role'] ?? 'main'));
-        $settings['site_role'] = in_array($new_role, ['main', 'partner'], true) ? $new_role : 'main';
-        $settings['partner_webhook_secret'] = sanitize_text_field(wp_unslash($_POST['partner_webhook_secret'] ?? ''));
-        $settings['partner_callback_url'] = esc_url_raw(trim((string) wp_unslash($_POST['partner_callback_url'] ?? '')));
-        $settings['partner_callback_secret'] = sanitize_text_field(wp_unslash($_POST['partner_callback_secret'] ?? ''));
+        if ($settings['site_role'] === 'partner') {
+            // Campi presenti solo nel form del sito partner.
+            $settings['partner_webhook_secret'] = sanitize_text_field(wp_unslash($_POST['partner_webhook_secret'] ?? ''));
+            $settings['partner_callback_url'] = esc_url_raw(trim((string) wp_unslash($_POST['partner_callback_url'] ?? '')));
+            $settings['partner_callback_secret'] = sanitize_text_field(wp_unslash($_POST['partner_callback_secret'] ?? ''));
+        } else {
+            // Campi presenti solo nel form del sito principale.
+            $settings['endpoint_slug'] = sanitize_title(wp_unslash($_POST['endpoint_slug'] ?? 'partner-login'));
+            $settings['courtesy_page_id'] = absint($_POST['courtesy_page_id'] ?? 0);
+            $settings['max_fail_short'] = max(1, absint($_POST['max_fail_short'] ?? 10));
+            $settings['max_fail_long'] = max(1, absint($_POST['max_fail_long'] ?? 25));
+            $settings['ban_short_minutes'] = max(1, absint($_POST['ban_short_minutes'] ?? 60));
+            $settings['ban_long_minutes'] = max(1, absint($_POST['ban_long_minutes'] ?? 1440));
+            $settings['window_short_minutes'] = max(1, absint($_POST['window_short_minutes'] ?? 10));
+            $settings['window_long_minutes'] = max(1, absint($_POST['window_long_minutes'] ?? 1440));
+            $settings['public_key_pem'] = trim((string) wp_unslash($_POST['public_key_pem'] ?? ''));
+            $settings['payment_callback_slug'] = sanitize_title(wp_unslash($_POST['payment_callback_slug'] ?? 'partner-payment-callback'));
+            $settings['payment_callback_secret'] = sanitize_text_field(wp_unslash($_POST['payment_callback_secret'] ?? ''));
+            $settings['payment_success_status'] = sanitize_text_field(wp_unslash($_POST['payment_success_status'] ?? 'pending')) ?: 'pending';
+        }
 
         update_option($this->settings_key, $settings);
 
-        wp_safe_redirect(add_query_arg(['page' => 'sos-partner-gateway-settings', 'msg' => 'saved'], admin_url('admin.php')));
+        // Bug fix: redirect to the correct admin page based on the active role.
+        // In partner mode the settings page slug is 'sos-partner-gateway'; in main mode it is
+        // 'sos-partner-gateway-settings'. Redirecting to the wrong slug shows "Non autorizzato".
+        $redirect_page = $settings['site_role'] === 'partner' ? 'sos-partner-gateway' : 'sos-partner-gateway-settings';
+        wp_safe_redirect(add_query_arg(['page' => $redirect_page, 'msg' => 'saved'], admin_url('admin.php')));
         exit;
     }
 
