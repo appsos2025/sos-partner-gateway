@@ -788,12 +788,13 @@ class SOS_PG_Plugin {
 
         // --- Selettore ruolo: sempre visibile in cima ---
         echo '<tr><th>Ruolo sito</th><td>';
-        echo '<select name="site_role" onchange="this.form.submit()">';
+        echo '<select name="site_role">';
         echo '<option value="main" ' . selected($settings['site_role'], 'main', false) . '>Sito principale (gateway)</option>';
         echo '<option value="partner" ' . selected($settings['site_role'], 'partner', false) . '>Sito partner</option>';
         echo '</select>';
         echo '<p class="description"><strong>Sito principale</strong>: riceve i login firmati, gestisce le prenotazioni LatePoint, invia webhook ai partner.<br>';
-        echo '<strong>Sito partner</strong>: firma e invia le richieste di login al sito principale tramite shortcode o tester.</p>';
+        echo '<strong>Sito partner</strong>: firma e invia le richieste di login al sito principale tramite shortcode o tester.<br>';
+        echo '<em>Dopo aver cambiato il ruolo, clicca &quot;Salva impostazioni&quot; per applicare la modalit&agrave;.</em></p>';
         echo '</td></tr>';
 
         if ($is_partner) {
@@ -1669,8 +1670,10 @@ class SOS_PG_Plugin {
         $settings = $this->get_settings();
         $secret = (string) ($settings['partner_webhook_secret'] ?? '');
         $raw = (string) file_get_contents('php://input');
-        $headers = function_exists('getallheaders') ? getallheaders() : [];
-        $sig = $headers['X-SOSPG-Signature'] ?? ($headers['x-sospg-signature'] ?? '');
+        // Normalizza i nomi degli header in lowercase per un confronto affidabile.
+        $headers_raw = function_exists('getallheaders') ? getallheaders() : [];
+        $headers = array_change_key_case((array) $headers_raw, CASE_LOWER);
+        $sig = (string) ($headers['x-sospg-signature'] ?? '');
         $valid = true;
 
         if ($secret !== '') {
@@ -1680,7 +1683,7 @@ class SOS_PG_Plugin {
 
         $payload = json_decode($raw, true);
         if (!is_array($payload) && $raw !== '') {
-            $ct = strtolower($headers['Content-Type'] ?? ($headers['content-type'] ?? ''));
+            $ct = strtolower($headers['content-type'] ?? '');
             if (strpos($ct, 'application/x-www-form-urlencoded') !== false) {
                 $arr = [];
                 parse_str($raw, $arr);
