@@ -371,6 +371,8 @@ class SOS_PG_Partner_Login_Tester {
 
         // Mark the stored webhook as auto-confirmed so the auto-submit form is not
         // rendered again on the next page load (prevents the infinite callback loop).
+        // Both cases (pay_auto flag from the hidden form OR a FREE- transaction) identify
+        // an auto-generated free-booking confirmation rather than a manual payment callback.
         if ($is_auto || strpos((string) $tx, 'FREE-') === 0) {
             $last = get_option($this->last_webhook_key, []);
             if (is_array($last)) {
@@ -382,7 +384,7 @@ class SOS_PG_Partner_Login_Tester {
         echo '<div class="notice notice-success"><p>Callback inviata. HTTP ' . esc_html($code) . '.</p></div>';
         echo '<p><a href="' . $back_url . '" class="button">Torna</a></p>';
         // Redirect via JavaScript (Post/Redirect/Get) to prevent browser form re-submission on refresh.
-        echo '<script>setTimeout(function(){window.location.replace("' . $back_url_js . '");},1500);</script>';
+        echo '<script>setTimeout(function(){window.location.replace("' . $back_url_js . '");},2000);</script>';
     }
 }
 
