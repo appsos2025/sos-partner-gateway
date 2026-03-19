@@ -148,14 +148,20 @@ class SOS_PG_Partner_Login_Tester {
                     echo '<div style="margin-top:8px;padding:8px 12px;background:#e8f5e9;border:1px solid #a5d6a7;border-radius:3px;">';
                     echo '<strong>&#10004; Prenotazione gratuita (totale 0 &euro;)</strong> &mdash; Il callback di conferma viene inviato automaticamente senza attendere il pagamento.';
                     echo '</div>';
-                    echo '<form id="sosPgAutoFreeForm" method="post" style="display:none;">';
-                    wp_nonce_field('sos_pg_tester_pay');
-                    echo '<input type="hidden" name="sos_pg_tester_action" value="pay">';
-                    echo '<input type="hidden" name="pay_booking_id" value="' . esc_attr($last_booking_id) . '">';
-                    echo '<input type="hidden" name="pay_partner_id" value="' . esc_attr($last['body']['partner_id'] ?? $settings['partner_id']) . '">';
-                    echo '<input type="hidden" name="pay_tx" value="FREE-' . esc_attr($last_booking_id) . '">';
-                    echo '</form>';
-                    echo '<script>document.addEventListener("DOMContentLoaded",function(){document.getElementById("sosPgAutoFreeForm").submit();});</script>';
+                    // Auto-submit only once: skip if this webhook was already auto-confirmed.
+                    if (empty($last['auto_confirmed'])) {
+                        echo '<form id="sosPgAutoFreeForm" method="post" style="display:none;">';
+                        wp_nonce_field('sos_pg_tester_pay');
+                        echo '<input type="hidden" name="sos_pg_tester_action" value="pay">';
+                        echo '<input type="hidden" name="pay_booking_id" value="' . esc_attr($last_booking_id) . '">';
+                        echo '<input type="hidden" name="pay_partner_id" value="' . esc_attr($last['body']['partner_id'] ?? $settings['partner_id']) . '">';
+                        echo '<input type="hidden" name="pay_tx" value="FREE-' . esc_attr($last_booking_id) . '">';
+                        echo '<input type="hidden" name="pay_auto" value="1">';
+                        echo '</form>';
+                        echo '<script>document.addEventListener("DOMContentLoaded",function(){document.getElementById("sosPgAutoFreeForm").submit();});</script>';
+                    } else {
+                        echo '<div style="margin-top:4px;padding:4px 12px;background:#f1f8e9;border:1px solid #c5e1a5;border-radius:3px;font-size:.85em;">&#10003; Conferma già inviata.</div>';
+                    }
                 } else {
                     echo '<div style="margin-top:8px;padding:6px 12px;background:#fff3cd;border:1px solid #ffc107;border-radius:3px;font-size:.85em;">';
                     echo '&#9888; <strong>Solo test interno</strong> &mdash; questo pulsante simula la conferma pagamento. ';
@@ -305,9 +311,14 @@ class SOS_PG_Partner_Login_Tester {
         $tx = sanitize_text_field($_POST['pay_tx'] ?? '');
         $amount = sanitize_text_field($_POST['pay_amount'] ?? '');
 
+        $is_auto = !empty($_POST['pay_auto']);
+        $back_url    = esc_url(admin_url('admin.php?page=sos-pg-partner-tester'));
+        $back_url_js = esc_js(admin_url('admin.php?page=sos-pg-partner-tester'));
+
         if (!$booking_id) {
             echo '<div class="notice notice-error"><p>Booking ID mancante.</p></div>';
-            echo '<p><a href="' . esc_url(admin_url('admin.php?page=sos-pg-partner-tester')) . '" class="button">Torna</a></p>';
+            echo '<p><a href="' . $back_url . '" class="button">Torna</a></p>';
+            echo '<script>setTimeout(function(){window.location.replace("' . $back_url_js . '");},2000);</script>';
             return;
         }
 
@@ -316,7 +327,8 @@ class SOS_PG_Partner_Login_Tester {
 
         if ($url === '' || $secret === '') {
             echo '<div class="notice notice-error"><p>Configura URL e secret callback pagamento.</p></div>';
-            echo '<p><a href="' . esc_url(admin_url('admin.php?page=sos-pg-partner-tester')) . '" class="button">Torna</a></p>';
+            echo '<p><a href="' . $back_url . '" class="button">Torna</a></p>';
+            echo '<script>setTimeout(function(){window.location.replace("' . $back_url_js . '");},2000);</script>';
             return;
         }
 
@@ -350,13 +362,29 @@ class SOS_PG_Partner_Login_Tester {
 
         if (is_wp_error($resp)) {
             echo '<div class="notice notice-error"><p>Errore: ' . esc_html($resp->get_error_message()) . '</p></div>';
-            echo '<p><a href="' . esc_url(admin_url('admin.php?page=sos-pg-partner-tester')) . '" class="button">Torna</a></p>';
+            echo '<p><a href="' . $back_url . '" class="button">Torna</a></p>';
+            echo '<script>setTimeout(function(){window.location.replace("' . $back_url_js . '");},2000);</script>';
             return;
         }
 
         $code = (int) wp_remote_retrieve_response_code($resp);
+
+        // Mark the stored webhook as auto-confirmed so the auto-submit form is not
+        // rendered again on the next page load (prevents the infinite callback loop).
+        // Both cases (pay_auto flag from the hidden form OR a FREE- transaction) identify
+        // an auto-generated free-booking confirmation rather than a manual payment callback.
+        if ($is_auto || strpos((string) $tx, 'FREE-') === 0) {
+            $last = get_option($this->last_webhook_key, []);
+            if (is_array($last)) {
+                $last['auto_confirmed'] = true;
+                update_option($this->last_webhook_key, $last);
+            }
+        }
+
         echo '<div class="notice notice-success"><p>Callback inviata. HTTP ' . esc_html($code) . '.</p></div>';
-        echo '<p><a href="' . esc_url(admin_url('admin.php?page=sos-pg-partner-tester')) . '" class="button">Torna</a></p>';
+        echo '<p><a href="' . $back_url . '" class="button">Torna</a></p>';
+        // Redirect via JavaScript (Post/Redirect/Get) to prevent browser form re-submission on refresh.
+        echo '<script>setTimeout(function(){window.location.replace("' . $back_url_js . '");},2000);</script>';
     }
 }
 

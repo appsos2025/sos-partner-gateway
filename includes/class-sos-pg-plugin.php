@@ -103,6 +103,7 @@ class SOS_PG_Plugin {
                 'payment_success_status' => 'pending',
                 'self_login_private_key_pem' => '',
                 'self_login_partner_id' => '',
+                'self_login_endpoint_url' => '',
             ]);
         }
     }
@@ -140,6 +141,7 @@ class SOS_PG_Plugin {
             'payment_success_status' => 'pending',
             'self_login_private_key_pem' => '',
             'self_login_partner_id' => '',
+            'self_login_endpoint_url' => '',
         ];
 
         $settings = get_option($this->settings_key, []);
@@ -765,7 +767,8 @@ class SOS_PG_Plugin {
         echo '<tr><th>Stato di successo pagamento</th><td><input type="text" class="regular-text" name="payment_success_status" value="' . esc_attr($settings['payment_success_status']) . '" placeholder="attesa_partner"><p class="description">Slug dello stato da impostare quando il partner conferma il pagamento (es. attesa_partner).</p></td></tr>';
         echo '<tr><th colspan="2"><hr style="margin:4px 0;"><strong>Shortcode [sos_partner_prenota] — uso self-service</strong><p class="description" style="font-weight:normal;">Usato quando vuoi inserire un pulsante "Prenota" direttamente su una pagina di questo sito senza un portale partner esterno. La chiave privata qui sotto firma la richiesta di login.</p></th></tr>';
         echo '<tr><th>Partner ID self-use</th><td><input type="text" class="regular-text" name="self_login_partner_id" value="' . esc_attr($settings['self_login_partner_id']) . '" placeholder="hf"><p class="description">Partner ID di default per lo shortcode quando non specificato nell\'attributo.</p></td></tr>';
-        echo '<tr><th>Chiave privata self-use (PEM)</th><td><textarea class="large-text code" rows="10" name="self_login_private_key_pem" placeholder="-----BEGIN PRIVATE KEY-----">' . esc_textarea($settings['self_login_private_key_pem']) . '</textarea><p class="description">Chiave privata ECC per firmare le richieste generate dallo shortcode. <strong>Deve corrispondere alla chiave pubblica configurata sopra.</strong></p></td></tr>';
+        echo '<tr><th>URL endpoint login</th><td><input type="url" class="regular-text" name="self_login_endpoint_url" value="' . esc_attr($settings['self_login_endpoint_url']) . '" placeholder="https://videoconsulto.sospediatra.org/partner-login/"><p class="description">Lascia vuoto per usare l\'endpoint locale (<code>' . esc_html(home_url($this->current_endpoint_path() . '/')) . '</code>). Compila con l\'URL completo del sito principale se il plugin è installato su un sito partner separato.</p></td></tr>';
+        echo '<tr><th>Chiave privata self-use (PEM)</th><td><textarea class="large-text code" rows="10" name="self_login_private_key_pem" placeholder="-----BEGIN PRIVATE KEY-----">' . esc_textarea($settings['self_login_private_key_pem']) . '</textarea><p class="description">Chiave privata ECC per firmare le richieste generate dallo shortcode. <strong>Deve corrispondere alla chiave pubblica configurata sull\'endpoint di login.</strong></p></td></tr>';
         echo '</table>';
         submit_button('Salva impostazioni');
         echo '</form></div>';
@@ -923,6 +926,7 @@ class SOS_PG_Plugin {
         $settings['payment_success_status'] = sanitize_text_field(wp_unslash($_POST['payment_success_status'] ?? 'pending')) ?: 'pending';
         $settings['self_login_private_key_pem'] = trim((string) wp_unslash($_POST['self_login_private_key_pem'] ?? ''));
         $settings['self_login_partner_id'] = sanitize_text_field(wp_unslash($_POST['self_login_partner_id'] ?? ''));
+        $settings['self_login_endpoint_url'] = esc_url_raw(trim((string) wp_unslash($_POST['self_login_endpoint_url'] ?? '')));
 
         update_option($this->settings_key, $settings);
 
@@ -1217,7 +1221,12 @@ class SOS_PG_Plugin {
         }
 
         $signature_b64 = base64_encode($signature_raw);
-        $endpoint = home_url($this->current_endpoint_path() . '/');
+
+        // Usa l'URL endpoint configurato; se vuoto usa quello locale (stesso sito).
+        $configured_endpoint = (string) ($settings['self_login_endpoint_url'] ?? '');
+        $endpoint = $configured_endpoint !== '' ? $configured_endpoint : home_url($this->current_endpoint_path() . '/');
+        // Assicura la slash finale.
+        $endpoint = rtrim($endpoint, '/') . '/';
 
         // Generiamo una pagina HTML che fa auto-POST al partner-login (stesso pattern del tester).
         status_header(200);
