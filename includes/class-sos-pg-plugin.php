@@ -5,9 +5,11 @@ class SOS_PG_Plugin {
     private static $instance = null;
     private $table_logs = '';
     private $booking_table = '';
+    private $booking_meta_table = '';
     private $settings_key = 'sos_pg_settings';
     private $routes_key = 'sos_pg_partner_routes';
     private $discounts_key = 'sos_pg_partner_discounts';
+    private $webhooks_key = 'sos_pg_partner_webhooks';
 
     public static function instance() {
         if (self::$instance === null) {
@@ -20,6 +22,7 @@ class SOS_PG_Plugin {
         global $wpdb;
         $this->table_logs = $wpdb->prefix . SOS_PG_TABLE_LOGS;
         $this->booking_table = $wpdb->prefix . 'latepoint_bookings';
+        $this->booking_meta_table = $wpdb->prefix . 'latepoint_booking_meta';
 
         register_activation_hook(SOS_PG_FILE, [$this, 'activate']);
 
@@ -36,6 +39,8 @@ class SOS_PG_Plugin {
         add_action('admin_post_sos_pg_clear_logs', [$this, 'handle_clear_logs']);
         add_action('admin_post_sos_pg_save_routes', [$this, 'handle_save_routes']);
         add_action('admin_post_sos_pg_save_discounts', [$this, 'handle_save_discounts']);
+        add_action('admin_post_sos_pg_save_webhooks', [$this, 'handle_save_webhooks']);
+        add_action('admin_post_sos_pg_send_payment_test', [$this, 'handle_send_payment_test']);
 
         // LatePoint sconto partner.
         add_filter('latepoint_full_amount', [$this, 'apply_partner_discount'], 20, 3);
@@ -45,6 +50,7 @@ class SOS_PG_Plugin {
 
         // LatePoint booking lifecycle.
         add_action('latepoint_after_create_booking', [$this, 'handle_booking_created'], 20, 2);
+        add_action('latepoint_booking_created', [$this, 'handle_booking_created'], 20, 2);
     }
 
     public function activate() {
@@ -87,11 +93,9 @@ class SOS_PG_Plugin {
                 'window_long_minutes' => 1440,
                 'public_key_pem' => "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7vF+KsTzI/Gn8jNxQViHyZV26iS/\nhI1seVH4oxEBapmL5cJLC9EZOq3cgmmfGfrM9h1qjTXtKd7yjJpb2wUwXg==\n-----END PUBLIC KEY-----",
                 'enable_latepoint_discount_hooks' => 0,
-                'partner_default_status' => 'attesa_partner',
-                'webhook_booking_url' => '',
-                'webhook_booking_secret' => '',
                 'payment_callback_slug' => 'partner-payment-callback',
                 'payment_callback_secret' => '',
+                'payment_success_status' => 'pending',
             ]);
         }
     }
@@ -109,11 +113,9 @@ class SOS_PG_Plugin {
             'window_long_minutes' => 1440,
             'public_key_pem' => "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7vF+KsTzI/Gn8jNxQViHyZV26iS/\nhI1seVH4oxEBapmL5cJLC9EZOq3cgmmfGfrM9h1qjTXtKd7yjJpb2wUwXg==\n-----END PUBLIC KEY-----",
             'enable_latepoint_discount_hooks' => 0,
-            'partner_default_status' => 'attesa_partner',
-            'webhook_booking_url' => '',
-            'webhook_booking_secret' => '',
             'payment_callback_slug' => 'partner-payment-callback',
             'payment_callback_secret' => '',
+            'payment_success_status' => 'pending',
         ];
 
         $settings = get_option($this->settings_key, []);
@@ -154,6 +156,11 @@ class SOS_PG_Plugin {
         return is_array($map) ? $map : [];
     }
 
+    private function get_partner_webhooks() {
+        $map = get_option($this->webhooks_key, []);
+        return is_array($map) ? $map : [];
+    }
+
     private function get_partner_discount_amount($partner_id = '') {
         if ($partner_id === '') {
             $partner_id = $this->get_current_partner_id();
@@ -167,13 +174,35 @@ class SOS_PG_Plugin {
         return isset($map[$partner_id]) ? (float) $map[$partner_id] : 0.0;
     }
 
+    private function set_booking_meta($booking_id, $key, $value) {
+        if (!$booking_id || !$key) {
+            return;
+        }
+
+        global $wpdb;
+        $now = current_time('mysql');
+        $wpdb->replace(
+            $this->booking_meta_table,
+            [
+                'object_id' => (int) $booking_id,
+                'meta_key' => (string) $key,
+                'meta_value' => (string) $value,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ],
+            ['%d', '%s', '%s', '%s', '%s']
+        );
+    }
+
     private function get_current_partner_id($user_id = 0) {
         if (!$user_id) {
             $user_id = get_current_user_id();
         }
 
         if (!$user_id) {
-            return '';
+            // Fallback su cookie se l’utente non risulta autenticato (es. sessione persa nel frontend LatePoint).
+            $cookie_pid = sanitize_text_field((string) ($_COOKIE['sos_pg_partner_id'] ?? ''));
+            return $cookie_pid;
         }
 
         $partner_id = get_user_meta($user_id, 'partner_id', true);
@@ -574,6 +603,9 @@ class SOS_PG_Plugin {
             ],
         ]);
 
+        // Cookie di cortesia per frontend LatePoint se la sessione WP viene persa.
+        setcookie('sos_pg_partner_id', $partner_id, time() + 4 * HOUR_IN_SECONDS, '/', '', is_ssl(), false);
+
         wp_safe_redirect($redirect_url);
         exit;
     }
@@ -609,6 +641,7 @@ class SOS_PG_Plugin {
             'cleared' => 'Log svuotati.',
             'discount_saved' => 'Sconti partner salvati.',
             'routes_saved' => 'Routing partner salvato.',
+            'webhooks_saved' => 'Webhook partner salvati.',
         ];
 
         if (isset($map[$msg])) {
@@ -621,6 +654,7 @@ class SOS_PG_Plugin {
         add_submenu_page('sos-partner-gateway', 'Log', 'Log', 'manage_options', 'sos-partner-gateway', [$this, 'render_logs_page']);
         add_submenu_page('sos-partner-gateway', 'Impostazioni', 'Impostazioni', 'manage_options', 'sos-partner-gateway-settings', [$this, 'render_settings_page']);
         add_submenu_page('sos-partner-gateway', 'Pagine Partner', 'Pagine Partner', 'manage_options', 'sos-partner-gateway-pages', [$this, 'render_pages_page']);
+        add_submenu_page('sos-partner-gateway', 'Test pagamento', 'Test pagamento', 'manage_options', 'sos-partner-gateway-payment-test', [$this, 'render_test_payment_page']);
     }
 
     public function render_logs_page() {
@@ -702,11 +736,9 @@ class SOS_PG_Plugin {
         echo '<tr><th>Rate limit lungo</th><td><input type="number" name="max_fail_long" value="' . esc_attr($settings['max_fail_long']) . '" min="1"> errori in <input type="number" name="window_long_minutes" value="' . esc_attr($settings['window_long_minutes']) . '" min="1"> minuti → ban <input type="number" name="ban_long_minutes" value="' . esc_attr($settings['ban_long_minutes']) . '" min="1"> minuti</td></tr>';
 
         echo '<tr><th>Chiave pubblica PEM</th><td><textarea class="large-text code" rows="12" name="public_key_pem">' . esc_textarea($settings['public_key_pem']) . '</textarea></td></tr>';
-        echo '<tr><th>Stato iniziale prenotazioni partner</th><td><input type="text" class="regular-text" name="partner_default_status" value="' . esc_attr($settings['partner_default_status']) . '" placeholder="attesa_partner"></td></tr>';
-        echo '<tr><th>Webhook prenotazioni → partner</th><td><input type="url" class="regular-text" name="webhook_booking_url" value="' . esc_attr($settings['webhook_booking_url']) . '" placeholder="https://partner.example.com/webhook"><p class="description">Se valorizzato, invia un POST JSON alla creazione di una prenotazione partner.</p></td></tr>';
-        echo '<tr><th>Secret webhook (HMAC)</th><td><input type="text" class="regular-text" name="webhook_booking_secret" value="' . esc_attr($settings['webhook_booking_secret']) . '" placeholder="secret condiviso"></td></tr>';
         echo '<tr><th>Slug callback pagamento partner</th><td><input type="text" class="regular-text" name="payment_callback_slug" value="' . esc_attr($settings['payment_callback_slug']) . '" placeholder="partner-payment-callback"><p class="description">Percorso chiamato dal partner per confermare il pagamento.</p></td></tr>';
         echo '<tr><th>Secret callback pagamento</th><td><input type="text" class="regular-text" name="payment_callback_secret" value="' . esc_attr($settings['payment_callback_secret']) . '" placeholder="secret condiviso"></td></tr>';
+        echo '<tr><th>Stato di successo pagamento</th><td><input type="text" class="regular-text" name="payment_success_status" value="' . esc_attr($settings['payment_success_status']) . '" placeholder="attesa_partner"><p class="description">Slug dello stato da impostare quando il partner conferma il pagamento (es. attesa_partner).</p></td></tr>';
         echo '</table>';
         submit_button('Salva impostazioni');
         echo '</form></div>';
@@ -782,6 +814,63 @@ class SOS_PG_Plugin {
         echo '</tbody></table>';
         echo '<p><button class="button button-primary" type="submit">Salva routing partner</button></p>';
         echo '</form>';
+
+        echo '<h2 style="margin-top:24px;">Webhook partner (booking_created)</h2>';
+        echo '<p>Configura URL e secret per ogni partner. Il payload inviato include booking_id, status, total, orario, customer_email.</p>';
+
+        echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin-top:12px;">';
+        wp_nonce_field('sos_pg_save_webhooks');
+        echo '<input type="hidden" name="action" value="sos_pg_save_webhooks">';
+        $webhooks = $this->get_partner_webhooks();
+        $webhooks[''] = ['url' => '', 'secret' => ''];
+        echo '<table class="widefat striped"><thead><tr><th>Partner ID</th><th>Webhook URL</th><th>Secret (HMAC)</th></tr></thead><tbody>';
+        foreach ($webhooks as $pid => $cfg) {
+            $url = is_array($cfg) ? ($cfg['url'] ?? '') : '';
+            $secret = is_array($cfg) ? ($cfg['secret'] ?? '') : '';
+            echo '<tr>';
+            echo '<td><input type="text" name="webhooks[partner_id][]" value="' . esc_attr($pid) . '" class="regular-text" placeholder="es. hf"></td>';
+            echo '<td><input type="url" name="webhooks[url][]" value="' . esc_attr($url) . '" class="regular-text" placeholder="https://partner.example.com/webhook"></td>';
+            echo '<td><input type="text" name="webhooks[secret][]" value="' . esc_attr($secret) . '" class="regular-text" placeholder="secret condiviso"></td>';
+            echo '</tr>';
+        }
+        echo '</tbody></table>';
+        echo '<p><button class="button button-primary" type="submit">Salva webhook partner</button></p>';
+        echo '</form>';
+    }
+
+    public function render_test_payment_page() {
+        if (!current_user_can('manage_options')) {
+            wp_die('Non autorizzato');
+        }
+
+        $settings = $this->get_settings();
+        $callback_url = home_url($this->current_payment_callback_path());
+        $msg = sanitize_text_field(wp_unslash($_GET['msg'] ?? ''));
+        $detail = sanitize_text_field(wp_unslash($_GET['detail'] ?? ''));
+
+        echo '<div class="wrap"><h1>SOS Partner Gateway — Test callback pagamento</h1>';
+
+        if ($msg === 'ok') {
+            echo '<div class="notice notice-success is-dismissible"><p>Callback inviata con successo ' . ($detail !== '' ? esc_html('(' . $detail . ')') : '') . '.</p></div>';
+        } elseif ($msg === 'fail') {
+            echo '<div class="notice notice-error is-dismissible"><p>Errore invio callback: ' . esc_html($detail !== '' ? $detail : 'verifica log') . '.</p></div>';
+        }
+
+        echo '<p>Invia una richiesta firmata al callback pagamento per testare la chiusura della prenotazione.</p>';
+        echo '<p><strong>URL callback:</strong> <code>' . esc_html($callback_url) . '</code></p>';
+        echo '<p><strong>Secret:</strong> ' . ($settings['payment_callback_secret'] ? '<code>configurato</code>' : '<span style="color:#d63638;">manca</span>') . '</p>';
+
+        echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin-top:16px;">';
+        wp_nonce_field('sos_pg_send_payment_test');
+        echo '<input type="hidden" name="action" value="sos_pg_send_payment_test">';
+        echo '<table class="form-table">';
+        echo '<tr><th>Booking ID</th><td><input type="number" name="booking_id" required min="1" class="regular-text"> <span class="description">ID prenotazione LatePoint</span></td></tr>';
+        echo '<tr><th>Partner ID</th><td><input type="text" name="partner_id" class="regular-text" placeholder="hf"> <span class="description">Facoltativo</span></td></tr>';
+        echo '<tr><th>Status da inviare</th><td><input type="text" name="status" class="regular-text" placeholder="pending" value="' . esc_attr($settings['payment_success_status']) . '"> <span class="description">Lascia vuoto per usare il valore di default</span></td></tr>';
+        echo '<tr><th>Transaction ID</th><td><input type="text" name="transaction_id" class="regular-text" value="TEST-' . esc_attr(time()) . '"></td></tr>';
+        echo '</table>';
+        submit_button('Invia callback di test');
+        echo '</form></div>';
     }
 
     public function handle_save_settings() {
@@ -802,11 +891,9 @@ class SOS_PG_Plugin {
         $settings['window_short_minutes'] = max(1, absint($_POST['window_short_minutes'] ?? 10));
         $settings['window_long_minutes'] = max(1, absint($_POST['window_long_minutes'] ?? 1440));
         $settings['public_key_pem'] = trim((string) wp_unslash($_POST['public_key_pem'] ?? ''));
-        $settings['partner_default_status'] = sanitize_text_field(wp_unslash($_POST['partner_default_status'] ?? 'attesa_partner'));
-        $settings['webhook_booking_url'] = esc_url_raw(trim((string) wp_unslash($_POST['webhook_booking_url'] ?? '')));
-        $settings['webhook_booking_secret'] = sanitize_text_field(wp_unslash($_POST['webhook_booking_secret'] ?? ''));
         $settings['payment_callback_slug'] = sanitize_title(wp_unslash($_POST['payment_callback_slug'] ?? 'partner-payment-callback'));
         $settings['payment_callback_secret'] = sanitize_text_field(wp_unslash($_POST['payment_callback_secret'] ?? ''));
+        $settings['payment_success_status'] = sanitize_text_field(wp_unslash($_POST['payment_success_status'] ?? 'pending')) ?: 'pending';
 
         update_option($this->settings_key, $settings);
 
@@ -884,6 +971,115 @@ class SOS_PG_Plugin {
         exit;
     }
 
+    public function handle_save_webhooks() {
+        if (!current_user_can('manage_options')) {
+            wp_die('Non autorizzato');
+        }
+
+        check_admin_referer('sos_pg_save_webhooks');
+
+        $partner_ids = $_POST['webhooks']['partner_id'] ?? [];
+        $urls = $_POST['webhooks']['url'] ?? [];
+        $secrets = $_POST['webhooks']['secret'] ?? [];
+
+        $map = [];
+        if (is_array($partner_ids) && is_array($urls) && is_array($secrets)) {
+            foreach ($partner_ids as $idx => $pid_raw) {
+                $pid = sanitize_text_field(wp_unslash($pid_raw));
+                $url = isset($urls[$idx]) ? esc_url_raw(trim((string) wp_unslash($urls[$idx]))) : '';
+                $secret = isset($secrets[$idx]) ? sanitize_text_field(wp_unslash($secrets[$idx])) : '';
+
+                if ($pid === '' || $url === '') {
+                    continue;
+                }
+
+                $map[$pid] = [
+                    'url' => $url,
+                    'secret' => $secret,
+                ];
+            }
+        }
+
+        update_option($this->webhooks_key, $map);
+
+        wp_safe_redirect(add_query_arg(['page' => 'sos-partner-gateway-pages', 'msg' => 'webhooks_saved'], admin_url('admin.php')));
+        exit;
+    }
+
+    public function handle_send_payment_test() {
+        if (!current_user_can('manage_options')) {
+            wp_die('Non autorizzato');
+        }
+
+        check_admin_referer('sos_pg_send_payment_test');
+
+        $booking_id = absint($_POST['booking_id'] ?? 0);
+        $partner_id = sanitize_text_field(wp_unslash($_POST['partner_id'] ?? ''));
+        $status = sanitize_text_field(wp_unslash($_POST['status'] ?? ''));
+        $transaction_id = sanitize_text_field(wp_unslash($_POST['transaction_id'] ?? ''));
+
+        $settings = $this->get_settings();
+
+        if (!$booking_id) {
+            wp_safe_redirect(add_query_arg(['page' => 'sos-partner-gateway-payment-test', 'msg' => 'fail', 'detail' => rawurlencode('Booking ID mancante')], admin_url('admin.php')));
+            exit;
+        }
+
+        if ($settings['payment_callback_secret'] === '') {
+            wp_safe_redirect(add_query_arg(['page' => 'sos-partner-gateway-payment-test', 'msg' => 'fail', 'detail' => rawurlencode('Secret non configurato')], admin_url('admin.php')));
+            exit;
+        }
+
+        $callback_url = home_url($this->current_payment_callback_path());
+        $payload = [
+            'booking_id' => $booking_id,
+        ];
+
+        if ($partner_id !== '') {
+            $payload['partner_id'] = $partner_id;
+        }
+
+        if ($status !== '') {
+            $payload['status'] = $status;
+        }
+
+        $payload['transaction_id'] = $transaction_id !== '' ? $transaction_id : 'TEST-' . time();
+
+        $body = wp_json_encode($payload);
+        $headers = [
+            'Content-Type' => 'application/json',
+            'X-SOSPG-Signature' => hash_hmac('sha256', (string) $body, (string) $settings['payment_callback_secret']),
+        ];
+
+        $resp = wp_remote_post($callback_url, [
+            'headers' => $headers,
+            'body' => $body,
+            'timeout' => 10,
+        ]);
+
+        if (is_wp_error($resp)) {
+            $this->log_event('ERROR', 'PAYMENT_CALLBACK_TEST_FAIL', [
+                'reason' => $resp->get_error_message(),
+                'context' => ['booking_id' => $booking_id, 'partner_id' => $partner_id],
+            ]);
+            wp_safe_redirect(add_query_arg(['page' => 'sos-partner-gateway-payment-test', 'msg' => 'fail', 'detail' => rawurlencode($resp->get_error_message())], admin_url('admin.php')));
+            exit;
+        }
+
+        $code = (int) wp_remote_retrieve_response_code($resp);
+        $this->log_event('INFO', 'PAYMENT_CALLBACK_TEST_OK', [
+            'partner_id' => $partner_id,
+            'context' => [
+                'booking_id' => $booking_id,
+                'http_code' => $code,
+            ],
+        ]);
+
+        $detail = 'HTTP ' . $code;
+        wp_safe_redirect(add_query_arg(['page' => 'sos-partner-gateway-payment-test', 'msg' => 'ok', 'detail' => rawurlencode($detail)], admin_url('admin.php')));
+        exit;
+    }
+
     public function apply_partner_discount($amount, $booking = null, $apply_coupons = null) {
         $discount = $this->get_partner_discount_amount();
 
@@ -933,11 +1129,11 @@ class SOS_PG_Plugin {
         $partner_id = $this->get_current_partner_id();
 
         if ($partner_id === '') {
+            $this->log_event('INFO', 'BOOKING_WEBHOOK_SKIP_NO_PARTNER', [
+                'context' => ['booking_id' => $this->safe_get($booking, 'id')],
+            ]);
             return;
         }
-
-        $settings = $this->get_settings();
-        $default_status = $settings['partner_default_status'];
 
         $booking_id = $this->safe_get($booking, 'id');
         $status = $this->safe_get($booking, 'status');
@@ -951,23 +1147,19 @@ class SOS_PG_Plugin {
         $customer_phone = $this->safe_get_nested($booking, ['customer', 'phone']);
         $customer_name = $this->safe_get_nested($booking, ['customer', 'full_name']);
 
-        if ($booking_id && $default_status && $status && $status !== $default_status) {
-            global $wpdb;
-            $wpdb->update(
-                $this->booking_table,
-                ['status' => $default_status],
-                ['id' => $booking_id],
-                ['%s'],
-                ['%d']
-            );
-            $status = $default_status;
-        }
+        $this->log_event('INFO', 'BOOKING_PARTNER_HOOK', [
+            'partner_id' => $partner_id,
+            'context' => [
+                'booking_id' => $booking_id,
+                'status' => $status,
+            ],
+        ]);
 
         $payload = [
             'event' => 'booking_created',
             'partner_id' => $partner_id,
             'booking_id' => $booking_id,
-            'status' => $status ?: $default_status,
+            'status' => $status,
             'service_id' => $service_id,
             'agent_id' => $agent_id,
             'start_date' => $start_date,
@@ -979,23 +1171,49 @@ class SOS_PG_Plugin {
             'customer_name' => $customer_name,
         ];
 
-        $this->send_booking_webhook($payload);
+        // Salva l'id partner in meta LatePoint (cf_910bA88i e partner_id) per tracciamento/report.
+        if ($booking_id && $partner_id) {
+            $this->set_booking_meta($booking_id, 'cf_910bA88i', $partner_id);
+            $this->set_booking_meta($booking_id, 'partner_id', $partner_id);
+        }
+
+        // Webhook per-partner con payload minimo utile al pagamento.
+        $partner_payload = [
+            'event' => 'booking_created',
+            'partner_id' => $partner_id,
+            'booking_id' => $booking_id,
+            'status' => $status,
+            'total' => $total,
+            'service_id' => $service_id,
+            'start_date' => $start_date,
+            'start_time' => $start_time,
+            'customer_email' => $customer_email,
+            'partner_field' => 'cf_910bA88i',
+        ];
+        $this->send_partner_webhook($partner_id, $partner_payload);
     }
 
-    private function send_booking_webhook(array $payload) {
-        $settings = $this->get_settings();
-        $url = $settings['webhook_booking_url'];
-
-        if ($url === '') {
+    private function send_partner_webhook($partner_id, array $payload) {
+        if (!$partner_id) {
             return;
         }
 
+        $webhooks = $this->get_partner_webhooks();
+        if (empty($webhooks[$partner_id]['url'])) {
+            $this->log_event('INFO', 'WEBHOOK_PARTNER_SKIP_NO_URL', [
+                'partner_id' => $partner_id,
+                'context' => ['booking_id' => $payload['booking_id'] ?? null],
+            ]);
+            return;
+        }
+
+        $url = $webhooks[$partner_id]['url'];
+        $secret = $webhooks[$partner_id]['secret'] ?? '';
+
         $body = wp_json_encode($payload);
         $headers = ['Content-Type' => 'application/json'];
-
-        if ($settings['webhook_booking_secret']) {
-            $sig = hash_hmac('sha256', (string) $body, (string) $settings['webhook_booking_secret']);
-            $headers['X-SOSPG-Signature'] = $sig;
+        if ($secret !== '') {
+            $headers['X-SOSPG-Signature'] = hash_hmac('sha256', (string) $body, (string) $secret);
         }
 
         $resp = wp_remote_post($url, [
@@ -1005,15 +1223,16 @@ class SOS_PG_Plugin {
         ]);
 
         if (is_wp_error($resp)) {
-            $this->log_event('ERROR', 'WEBHOOK_BOOKING_FAIL', [
+            $this->log_event('ERROR', 'WEBHOOK_PARTNER_FAIL', [
+                'partner_id' => $partner_id,
                 'reason' => $resp->get_error_message(),
                 'context' => $payload,
             ]);
             return;
         }
 
-        $this->log_event('INFO', 'WEBHOOK_BOOKING_SENT', [
-            'partner_id' => $payload['partner_id'] ?? '',
+        $this->log_event('INFO', 'WEBHOOK_PARTNER_SENT', [
+            'partner_id' => $partner_id,
             'context' => ['http_code' => wp_remote_retrieve_response_code($resp)],
         ]);
     }
@@ -1050,21 +1269,33 @@ class SOS_PG_Plugin {
         }
 
         $booking_id = absint($data['booking_id'] ?? 0);
-        $new_status = sanitize_text_field($data['status'] ?? '');
+        $incoming_status = sanitize_text_field($data['status'] ?? '');
         $transaction_id = sanitize_text_field($data['transaction_id'] ?? '');
         $partner_id = sanitize_text_field($data['partner_id'] ?? '');
 
-        if (!$booking_id || $new_status === '') {
+        if (!$booking_id) {
             status_header(400);
             exit('Dati mancanti');
+        }
+
+        // Stato finale sempre gestito da LatePoint: fissiamo pending (o valore da impostazioni) e pagamento "paid".
+        $target_status = $settings['payment_success_status'] ?: 'pending';
+        $target_payment_status = 'paid';
+
+        if ($target_status === '') {
+            status_header(400);
+            exit('Stato mancante');
         }
 
         global $wpdb;
         $wpdb->update(
             $this->booking_table,
-            ['status' => $new_status],
+            [
+                'status' => $target_status,
+                'payment_status' => $target_payment_status,
+            ],
             ['id' => $booking_id],
-            ['%s'],
+            ['%s', '%s'],
             ['%d']
         );
 
@@ -1072,7 +1303,7 @@ class SOS_PG_Plugin {
             'partner_id' => $partner_id,
             'context' => [
                 'booking_id' => $booking_id,
-                'status' => $new_status,
+                'status' => $target_status,
                 'transaction_id' => $transaction_id,
             ],
         ]);

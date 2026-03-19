@@ -9,7 +9,14 @@
 - [x] Protezione pagine partner
 - [x] Redirect dinamico per partner
 
-## Fase 2 — F+H
+## Fase 2 — Webhook partner e pagamenti
+- [x] Webhook per-partner `booking_created` con payload minimo e HMAC header `X-SOSPG-Signature`
+- [x] Log dedicati per invio/errore webhook
+- [x] Salvataggio `partner_id` e `cf_910bA88i` nei meta prenotazione
+- [x] Callback pagamento HMAC → stato configurabile + `payment_status=paid`
+- [x] Tester callback pagamento da admin
+
+## Fase 3 — F+H
 - [ ] Pagina dedicata `/prenotazioni-fh/`
 - [ ] Stato LatePoint dedicato `F+H`
 - [ ] Location LatePoint dedicata `F+H`

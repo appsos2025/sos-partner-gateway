@@ -12,9 +12,11 @@ if (!defined('ABSPATH')) {
 
 class SOS_PG_Partner_Login_Tester {
     private $option_key = 'sos_pg_tester_settings';
+    private $last_webhook_key = 'sos_pg_tester_last_webhook';
 
     public function __construct() {
         add_action('admin_menu', [$this, 'admin_menu']);
+        add_action('init', [$this, 'handle_webhook_listener']);
     }
 
     public function admin_menu() {
@@ -36,6 +38,9 @@ class SOS_PG_Partner_Login_Tester {
             'email' => 'test@example.com',
             'private_key_pem' => '',
             'private_key_path' => '',
+            'webhook_secret' => '',
+            'payment_callback_url' => '',
+            'payment_callback_secret' => '',
         ];
         $stored = get_option($this->option_key, []);
         if (!is_array($stored)) {
@@ -56,6 +61,9 @@ class SOS_PG_Partner_Login_Tester {
             'email' => sanitize_email($_POST['email'] ?? ''),
             'private_key_pem' => trim((string) ($_POST['private_key_pem'] ?? '')),
             'private_key_path' => trim((string) ($_POST['private_key_path'] ?? '')),
+            'webhook_secret' => sanitize_text_field($_POST['webhook_secret'] ?? ''),
+            'payment_callback_url' => esc_url_raw(trim((string) ($_POST['payment_callback_url'] ?? ''))),
+            'payment_callback_secret' => sanitize_text_field($_POST['payment_callback_secret'] ?? ''),
         ];
 
         update_option($this->option_key, $settings);
@@ -79,6 +87,12 @@ class SOS_PG_Partner_Login_Tester {
             return;
         }
 
+        if (isset($_POST['sos_pg_tester_action']) && $_POST['sos_pg_tester_action'] === 'pay') {
+            check_admin_referer('sos_pg_tester_pay');
+            $this->send_payment_callback($settings);
+            return;
+        }
+
         echo '<div class="wrap"><h1>Partner Login Tester</h1>';
         echo '<p>Compila endpoint, partner_id, email e chiave privata ECC/PEM per firmare la richiesta. Poi clicca "Invia login di test" per aprire il redirect sul dominio target.</p>';
 
@@ -92,6 +106,9 @@ class SOS_PG_Partner_Login_Tester {
         echo '<tr><th>Email payload</th><td><input type="email" class="regular-text" name="email" value="' . esc_attr($settings['email']) . '" placeholder="user@example.com"></td></tr>';
         echo '<tr><th>Chiave privata (PEM)</th><td><textarea name="private_key_pem" rows="10" class="large-text code" placeholder="-----BEGIN PRIVATE KEY-----">' . esc_textarea($settings['private_key_pem']) . '</textarea><p class="description">Incolla il PEM oppure indica un percorso file.</p></td></tr>';
         echo '<tr><th>Percorso file PEM</th><td><input type="text" class="regular-text" name="private_key_path" value="' . esc_attr($settings['private_key_path']) . '" placeholder="/path/to/private.pem"><p class="description">Se valorizzato, viene letto questo file (ha precedenza sul textarea).</p></td></tr>';
+        echo '<tr><th>Secret webhook (HMAC)</th><td><input type="text" class="regular-text" name="webhook_secret" value="' . esc_attr($settings['webhook_secret']) . '" placeholder="secret condiviso dal gateway"></td></tr>';
+        echo '<tr><th>URL callback pagamento</th><td><input type="url" class="regular-text" name="payment_callback_url" value="' . esc_attr($settings['payment_callback_url']) . '" placeholder="https://videoconsulto.../partner-payment-callback"></td></tr>';
+        echo '<tr><th>Secret callback pagamento</th><td><input type="text" class="regular-text" name="payment_callback_secret" value="' . esc_attr($settings['payment_callback_secret']) . '" placeholder="secret condiviso"></td></tr>';
         echo '</table>';
 
         submit_button('Salva configurazione');
@@ -103,6 +120,36 @@ class SOS_PG_Partner_Login_Tester {
         wp_nonce_field('sos_pg_tester_send');
         echo '<input type="hidden" name="sos_pg_tester_action" value="send">';
         submit_button('Invia login di test', 'primary', 'submit', false);
+        echo '</form>';
+
+        echo '<hr style="margin:24px 0;">';
+
+        $listener_url = home_url('/?sos_pg_tester_webhook=1');
+        $last = get_option($this->last_webhook_key, []);
+        echo '<h2>Listener webhook (booking_created)</h2>';
+        echo '<p>Configura nel gateway questo URL: <code>' . esc_html($listener_url) . '</code></p>';
+        echo '<p>Ultimo webhook ricevuto:</p>';
+        if ($last) {
+            echo '<pre style="max-height:240px;overflow:auto;background:#f6f6f6;padding:8px;border:1px solid #ddd;">' . esc_html(wp_json_encode($last, JSON_PRETTY_PRINT)) . '</pre>';
+        } else {
+            echo '<p>Nessun webhook ricevuto.</p>';
+        }
+
+        echo '<hr style="margin:24px 0;">';
+
+        echo '<h2>Invia callback pagamento</h2>';
+        echo '<p>Invia un callback firmato HMAC con booking_id e opzionale status. Puoi lasciare vuoto status: il gateway userà il proprio default.</p>';
+        echo '<form method="post">';
+        wp_nonce_field('sos_pg_tester_pay');
+        echo '<input type="hidden" name="sos_pg_tester_action" value="pay">';
+        echo '<table class="form-table">';
+        echo '<tr><th>Booking ID</th><td><input type="number" name="pay_booking_id" class="regular-text" min="1" required></td></tr>';
+        echo '<tr><th>Partner ID</th><td><input type="text" name="pay_partner_id" class="regular-text" value="' . esc_attr($settings['partner_id']) . '" placeholder="hf"></td></tr>';
+        echo '<tr><th>Status (opzionale)</th><td><input type="text" name="pay_status" class="regular-text" placeholder="pending"></td></tr>';
+        echo '<tr><th>Transaction ID</th><td><input type="text" name="pay_tx" class="regular-text" value="TEST-' . esc_attr(time()) . '"></td></tr>';
+        echo '<tr><th>Importo (facoltativo)</th><td><input type="number" step="0.01" name="pay_amount" class="regular-text" placeholder="1.00"><p class="description">Facoltativo, per debug; il gateway attuale ignora l’importo.</p></td></tr>';
+        echo '</table>';
+        submit_button('Invia callback pagamento');
         echo '</form>';
 
         echo '</div>';
@@ -167,6 +214,109 @@ class SOS_PG_Partner_Login_Tester {
         // Log minimale lato WP per debug.
         $msg = sprintf('PARTNER TEST SEND | endpoint=%s | partner_id=%s | email=%s | timestamp=%s | nonce=%s', $endpoint, $partner_id, $email, $timestamp, $nonce);
         error_log($msg);
+    }
+
+    public function handle_webhook_listener() {
+        if (!isset($_GET['sos_pg_tester_webhook'])) {
+            return;
+        }
+
+        $secret = $this->get_settings()['webhook_secret'];
+        $raw = file_get_contents('php://input');
+        $headers = function_exists('getallheaders') ? getallheaders() : [];
+        $sig = $headers['X-SOSPG-Signature'] ?? ($headers['x-sospg-signature'] ?? '');
+        $valid = true;
+
+        if ($secret !== '') {
+            $calc = hash_hmac('sha256', (string) $raw, (string) $secret);
+            $valid = ($sig && hash_equals($calc, $sig));
+        }
+
+        $payload = json_decode($raw, true);
+
+        // Se è form-urlencoded, decodifica in array per comodità.
+        if (!is_array($payload) && is_string($raw) && $raw !== '') {
+            $content_type = strtolower($headers['Content-Type'] ?? ($headers['content-type'] ?? ''));
+            if (strpos($content_type, 'application/x-www-form-urlencoded') !== false) {
+                $arr = [];
+                parse_str($raw, $arr);
+                if (is_array($arr) && !empty($arr)) {
+                    $payload = $arr;
+                }
+            }
+        }
+        $store = [
+            'received_at' => current_time('mysql'),
+            'valid_signature' => $valid,
+            'headers' => $headers,
+            'body' => $payload,
+            'raw' => $raw,
+        ];
+        update_option($this->last_webhook_key, $store);
+
+        status_header($valid ? 200 : 401);
+        wp_send_json(['ok' => $valid]);
+    }
+
+    private function send_payment_callback($settings) {
+        $booking_id = absint($_POST['pay_booking_id'] ?? 0);
+        $partner_id = sanitize_text_field($_POST['pay_partner_id'] ?? '');
+        $status = sanitize_text_field($_POST['pay_status'] ?? '');
+        $tx = sanitize_text_field($_POST['pay_tx'] ?? '');
+        $amount = sanitize_text_field($_POST['pay_amount'] ?? '');
+
+        if (!$booking_id) {
+            echo '<div class="notice notice-error"><p>Booking ID mancante.</p></div>';
+            echo '<p><a href="' . esc_url(admin_url('admin.php?page=sos-pg-partner-tester')) . '" class="button">Torna</a></p>';
+            return;
+        }
+
+        $url = $settings['payment_callback_url'];
+        $secret = $settings['payment_callback_secret'];
+
+        if ($url === '' || $secret === '') {
+            echo '<div class="notice notice-error"><p>Configura URL e secret callback pagamento.</p></div>';
+            echo '<p><a href="' . esc_url(admin_url('admin.php?page=sos-pg-partner-tester')) . '" class="button">Torna</a></p>';
+            return;
+        }
+
+        $payload = [
+            'booking_id' => $booking_id,
+        ];
+        if ($partner_id !== '') {
+            $payload['partner_id'] = $partner_id;
+        }
+        if ($status !== '') {
+            $payload['status'] = $status;
+        }
+        if ($tx !== '') {
+            $payload['transaction_id'] = $tx;
+        }
+        if ($amount !== '') {
+            $payload['amount'] = $amount;
+        }
+
+        $body = wp_json_encode($payload);
+        $headers = [
+            'Content-Type' => 'application/json',
+            'X-SOSPG-Signature' => hash_hmac('sha256', (string) $body, (string) $secret),
+        ];
+
+        $resp = wp_remote_post($url, [
+            'headers' => $headers,
+            'body' => $body,
+            'timeout' => 10,
+        ]);
+
+        if (is_wp_error($resp)) {
+            echo '<div class="notice notice-error"><p>Errore: ' . esc_html($resp->get_error_message()) . '</p></div>';
+            echo '<p><a href="' . esc_url(admin_url('admin.php?page=sos-pg-partner-tester')) . '" class="button">Torna</a></p>';
+            return;
+        }
+
+        $code = (int) wp_remote_retrieve_response_code($resp);
+        echo '<div class="notice notice-success"><p>Callback inviata. HTTP ' . esc_html($code) . '.</p></div>';
+        echo '<p><a href="' . esc_url(admin_url('admin.php?page=sos-pg-partner-tester')) . '" class="button">Torna</a></p>';
     }
 }
 

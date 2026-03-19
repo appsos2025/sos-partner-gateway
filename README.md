@@ -15,3 +15,31 @@ Plugin WordPress per:
 3. L'utente viene creato o recuperato
 4. Il plugin salva `partner_id` e reindirizza alla pagina partner configurata
 5. La pagina partner è accessibile solo se l'utente è autenticato e ha il `partner_id` corretto
+6. Alla creazione booking LatePoint, il plugin invia un webhook per-partner con payload minimale e HMAC
+7. Il partner invia il callback di pagamento firmato per marcare la prenotazione come `payment_status=paid` e stato configurato
+
+## Webhook booking_created (per-partner)
+- Configurazione: menu Partner Gateway → Pagine Partner → Webhook partner. Ogni partner ha URL e secret (HMAC SHA256 su body JSON).
+- Eventi inviati: solo `booking_created`.
+- Header: `Content-Type: application/json`, `X-SOSPG-Signature: <hmac>`
+- Payload minimo:
+	- `event`, `partner_id`, `booking_id`, `status`, `service_id`
+	- `start_date`, `start_time`
+	- `total`
+	- `customer_email`
+	- `partner_field` (campo LatePoint usato per partner: `cf_910bA88i`)
+- Logging: `BOOKING_PARTNER_HOOK`, `WEBHOOK_PARTNER_SENT`, `WEBHOOK_PARTNER_FAIL`, `WEBHOOK_PARTNER_SKIP_NO_URL`.
+
+## Callback pagamento
+- Endpoint: slug configurabile in Impostazioni (default `/partner-payment-callback`)
+- Autenticazione: header `X-SOSPG-Signature` = HMAC SHA256 sul raw body JSON usando il secret configurato.
+- Payload minimo accettato:
+	- `booking_id` (obbligatorio)
+	- `status` (facoltativo, se assente usa `payment_success_status` configurato)
+	- `transaction_id` (facoltativo)
+	- `partner_id` (facoltativo)
+- Effetto: aggiorna la prenotazione LatePoint con `status = payment_success_status` (default `pending`) e `payment_status = paid`, logga `PAYMENT_CALLBACK_OK`.
+
+## Tracciamento partner nei booking
+- Durante la creazione prenotazione vengono scritti i meta LatePoint `partner_id` e `cf_910bA88i` con il valore del partner corrente.
+- I cookie `sos_pg_partner_id` mantengono il partner se la sessione WordPress scade prima del checkout LatePoint.
