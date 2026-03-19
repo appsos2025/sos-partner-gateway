@@ -10,6 +10,7 @@ class SOS_PG_Plugin {
     private $routes_key = 'sos_pg_partner_routes';
     private $discounts_key = 'sos_pg_partner_discounts';
     private $webhooks_key = 'sos_pg_partner_webhooks';
+    private $default_latepoint_partner_field = 'cf_910bA88i';
 
     public static function instance() {
         if (self::$instance === null) {
@@ -91,11 +92,12 @@ class SOS_PG_Plugin {
                 'ban_long_minutes' => 1440,
                 'window_short_minutes' => 10,
                 'window_long_minutes' => 1440,
-                'public_key_pem' => "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7vF+KsTzI/Gn8jNxQViHyZV26iS/\nhI1seVH4oxEBapmL5cJLC9EZOq3cgmmfGfrM9h1qjTXtKd7yjJpb2wUwXg==\n-----END PUBLIC KEY-----",
+                'public_key_pem' => '',
                 'enable_latepoint_discount_hooks' => 0,
                 'payment_callback_slug' => 'partner-payment-callback',
                 'payment_callback_secret' => '',
                 'payment_success_status' => 'pending',
+                'latepoint_partner_field' => $this->default_latepoint_partner_field,
             ]);
         }
     }
@@ -111,11 +113,12 @@ class SOS_PG_Plugin {
             'ban_long_minutes' => 1440,
             'window_short_minutes' => 10,
             'window_long_minutes' => 1440,
-            'public_key_pem' => "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7vF+KsTzI/Gn8jNxQViHyZV26iS/\nhI1seVH4oxEBapmL5cJLC9EZOq3cgmmfGfrM9h1qjTXtKd7yjJpb2wUwXg==\n-----END PUBLIC KEY-----",
+            'public_key_pem' => '',
             'enable_latepoint_discount_hooks' => 0,
             'payment_callback_slug' => 'partner-payment-callback',
             'payment_callback_secret' => '',
             'payment_success_status' => 'pending',
+            'latepoint_partner_field' => $this->default_latepoint_partner_field,
         ];
 
         $settings = get_option($this->settings_key, []);
@@ -739,6 +742,7 @@ class SOS_PG_Plugin {
         echo '<tr><th>Slug callback pagamento partner</th><td><input type="text" class="regular-text" name="payment_callback_slug" value="' . esc_attr($settings['payment_callback_slug']) . '" placeholder="partner-payment-callback"><p class="description">Percorso chiamato dal partner per confermare il pagamento.</p></td></tr>';
         echo '<tr><th>Secret callback pagamento</th><td><input type="text" class="regular-text" name="payment_callback_secret" value="' . esc_attr($settings['payment_callback_secret']) . '" placeholder="secret condiviso"></td></tr>';
         echo '<tr><th>Stato di successo pagamento</th><td><input type="text" class="regular-text" name="payment_success_status" value="' . esc_attr($settings['payment_success_status']) . '" placeholder="attesa_partner"><p class="description">Slug dello stato da impostare quando il partner conferma il pagamento (es. attesa_partner).</p></td></tr>';
+        echo '<tr><th>Campo LatePoint partner</th><td><input type="text" class="regular-text" name="latepoint_partner_field" value="' . esc_attr($settings['latepoint_partner_field']) . '" placeholder="' . esc_attr($this->default_latepoint_partner_field) . '"><p class="description">Nome del campo custom LatePoint usato per tracciare il partner nella prenotazione (es. cf_910bA88i). Può variare per installazioni diverse.</p></td></tr>';
         echo '</table>';
         submit_button('Salva impostazioni');
         echo '</form></div>';
@@ -894,6 +898,7 @@ class SOS_PG_Plugin {
         $settings['payment_callback_slug'] = sanitize_title(wp_unslash($_POST['payment_callback_slug'] ?? 'partner-payment-callback'));
         $settings['payment_callback_secret'] = sanitize_text_field(wp_unslash($_POST['payment_callback_secret'] ?? ''));
         $settings['payment_success_status'] = sanitize_text_field(wp_unslash($_POST['payment_success_status'] ?? 'pending')) ?: 'pending';
+        $settings['latepoint_partner_field'] = sanitize_text_field(wp_unslash($_POST['latepoint_partner_field'] ?? $this->default_latepoint_partner_field)) ?: $this->default_latepoint_partner_field;
 
         update_option($this->settings_key, $settings);
 
@@ -1171,9 +1176,9 @@ class SOS_PG_Plugin {
             'customer_name' => $customer_name,
         ];
 
-        // Salva l'id partner in meta LatePoint (cf_910bA88i e partner_id) per tracciamento/report.
+        // Salva l'id partner in meta LatePoint (campo configurabile e partner_id) per tracciamento/report.
         if ($booking_id && $partner_id) {
-            $this->set_booking_meta($booking_id, 'cf_910bA88i', $partner_id);
+            $this->set_booking_meta($booking_id, $this->get_partner_field_name(), $partner_id);
             $this->set_booking_meta($booking_id, 'partner_id', $partner_id);
         }
 
@@ -1188,7 +1193,7 @@ class SOS_PG_Plugin {
             'start_date' => $start_date,
             'start_time' => $start_time,
             'customer_email' => $customer_email,
-            'partner_field' => 'cf_910bA88i',
+            'partner_field' => $this->get_partner_field_name(),
         ];
         $this->send_partner_webhook($partner_id, $partner_payload);
     }
@@ -1309,6 +1314,11 @@ class SOS_PG_Plugin {
         ]);
 
         wp_send_json_success(['ok' => true]);
+    }
+
+    private function get_partner_field_name() {
+        $field = trim((string) $this->get_settings()['latepoint_partner_field']);
+        return $field !== '' ? $field : $this->default_latepoint_partner_field;
     }
 
     private function safe_get($source, $key, $default = '') {

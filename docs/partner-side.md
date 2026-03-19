@@ -1,7 +1,7 @@
 # Istruzioni lato partner
 
 ## Endpoint login
-POST https://videoconsulto.sospediatra.org/partner-login/
+POST https://<tuo-dominio>/partner-login/
 
 ## Campi richiesti
 - partner_id
@@ -15,12 +15,12 @@ partner_id|payload|timestamp|nonce
 
 ## Form HTML esempio
 ```html
-<form id="partnerLoginForm" action="https://videoconsulto.sospediatra.org/partner-login/" method="POST">
-  <input type="hidden" name="partner_id" value="fh">
-  <input type="hidden" name="payload" value="mario.rossi@example.com">
-  <input type="hidden" name="timestamp" value="1710267000">
-  <input type="hidden" name="nonce" value="abc123xyz">
-  <input type="hidden" name="signature" value="BASE64_SIGNATURE">
+<form id="partnerLoginForm" action="https://<tuo-dominio>/partner-login/" method="POST">
+  <input type="hidden" name="partner_id" value="<partner_id>">
+  <input type="hidden" name="payload" value="utente@esempio.it">
+  <input type="hidden" name="timestamp" value="<unix_timestamp>">
+  <input type="hidden" name="nonce" value="<stringa_casuale>">
+  <input type="hidden" name="signature" value="<BASE64_FIRMA_ECC>">
 </form>
 <script>document.getElementById('partnerLoginForm').submit();</script>
 ```
@@ -32,10 +32,10 @@ partner_id|payload|timestamp|nonce
   - partner_id, booking_id, status
   - service_id, start_date, start_time, total
   - customer_email
-  - partner_field = cf_910bA88i
+  - partner_field = nome campo LatePoint configurato nelle impostazioni (default cf_910bA88i)
 
 ## Callback pagamento (dal partner al gateway)
-- Endpoint: /partner-payment-callback (slug configurabile)
+- Endpoint: /partner-payment-callback (slug configurabile nelle impostazioni)
 - Header: Content-Type: application/json, X-SOSPG-Signature = HMAC SHA256 sul body con secret condiviso.
 - Payload minimo accettato:
   - booking_id (obbligatorio)

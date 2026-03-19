@@ -1,0 +1,6 @@
+# Chiavi crittografiche - non committare mai
+*.pem
+*.key
+
+# Artefatti di sviluppo
+file/

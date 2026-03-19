@@ -34,8 +34,8 @@ class SOS_PG_Partner_Login_Tester {
     private function get_settings() {
         $defaults = [
             'endpoint_url' => '',
-            'partner_id' => 'hf',
-            'email' => 'test@example.com',
+            'partner_id' => '',
+            'email' => '',
             'private_key_pem' => '',
             'private_key_path' => '',
             'webhook_secret' => '',
