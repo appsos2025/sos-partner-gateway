@@ -264,7 +264,8 @@ function render_dashboard() {
             <th>Partner</th>
             <th>Location</th>
             <th>Data / Ora</th>
-            <th>Totale</th>
+            <th>Totale (sito principale)</th>
+            <th>Da incassare (partner)</th>
             <th>Email cliente</th>
             <th>Stato</th>
             <th>Pagamento</th>
@@ -274,9 +275,18 @@ function render_dashboard() {
     <tbody>
     <?php foreach ($bookings as $bid => $b): ?>
         <?php
-            $is_free_row    = (float)($b['total'] ?? -1) === 0.0;
-            $is_paid_row    = !empty($b['payment_sent']);
-            $row_total_fmt  = $is_free_row ? '<span style="color:#2e7d32;font-weight:600;">Gratuita</span>' : h(number_format((float)($b['total'] ?? 0), 2)) . ' &euro;';
+            $is_free_row     = (float)($b['total'] ?? -1) === 0.0;
+            $is_pay_partner  = !empty($b['pay_on_partner']);
+            $partner_charge  = isset($b['partner_charge']) ? (float)$b['partner_charge'] : null;
+            $is_paid_row     = !empty($b['payment_sent']);
+
+            $row_total_fmt   = $is_free_row
+                ? '<span style="color:#2e7d32;font-weight:600;">0 &euro; (sito)</span>'
+                : h(number_format((float)($b['total'] ?? 0), 2)) . ' &euro;';
+
+            $row_charge_fmt  = $is_pay_partner && $partner_charge !== null
+                ? '<strong>' . h(number_format($partner_charge, 2)) . ' &euro;</strong>'
+                : '<span style="color:#aaa;">&mdash;</span>';
         ?>
         <tr>
             <td><?= h($bid) ?></td>
@@ -285,12 +295,15 @@ function render_dashboard() {
             <td><?= h($b['location_id'] ?? '') ?></td>
             <td><?= h($b['start_date'] ?? '') ?> <?= h($b['start_time'] ?? '') ?></td>
             <td><?= $row_total_fmt ?></td>
+            <td><?= $row_charge_fmt ?></td>
             <td><?= h($b['customer_email'] ?? '') ?></td>
             <td><?= h($b['status'] ?? '') ?></td>
             <td>
                 <?php if ($is_paid_row): ?>
                     <span style="color:#2e7d32;">&#10004; Confermato</span><br>
                     <small style="color:#888;"><?= h($b['payment_sent_at'] ?? '') ?></small>
+                <?php elseif ($is_pay_partner): ?>
+                    <span style="color:#e65100;">Incassare dal cliente</span>
                 <?php else: ?>
                     <span style="color:#e65100;">In attesa</span>
                 <?php endif; ?>
@@ -303,7 +316,13 @@ function render_dashboard() {
                         <input type="hidden" name="booking_id" value="<?= h($bid) ?>">
                         <input type="hidden" name="partner_id" value="<?= h($b['partner_id'] ?? '') ?>">
                         <input type="hidden" name="transaction_id" value="PAY-<?= h($bid) ?>-<?= time() ?>">
-                        <button class="btn" type="submit"><?= $is_free_row ? 'Conferma (gratuita)' : 'Conferma pagamento' ?></button>
+                        <?php if ($is_pay_partner): ?>
+                            <button class="btn" type="submit">Conferma pagamento incassato (<?= $partner_charge !== null ? h(number_format($partner_charge, 2)) . ' &euro;' : '?' ?>)</button>
+                        <?php elseif ($is_free_row): ?>
+                            <button class="btn" type="submit">Conferma (gratuita)</button>
+                        <?php else: ?>
+                            <button class="btn" type="submit">Conferma pagamento</button>
+                        <?php endif; ?>
                     </form>
                 <?php endif; ?>
             </td>

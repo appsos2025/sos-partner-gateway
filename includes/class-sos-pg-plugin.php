@@ -11,6 +11,7 @@ class SOS_PG_Plugin {
     private $discounts_key = 'sos_pg_partner_discounts';
     private $webhooks_key = 'sos_pg_partner_webhooks';
     private $tester_webhook_key = 'sos_pg_main_last_webhook';
+    private $partner_original_total = null;
 
     public static function instance() {
         if (self::$instance === null) {
@@ -215,17 +216,34 @@ class SOS_PG_Plugin {
         return is_array($map) ? $map : [];
     }
 
-    private function get_partner_discount_amount($partner_id = '') {
+    private function get_partner_discount_config($partner_id = '') {
         if ($partner_id === '') {
             $partner_id = $this->get_current_partner_id();
         }
 
+        $defaults = ['amount' => 0.0, 'type' => 'fixed', 'pay_on_partner' => false];
+
         if ($partner_id === '') {
-            return 0.0;
+            return $defaults;
         }
 
         $map = $this->get_partner_discounts();
-        return isset($map[$partner_id]) ? (float) $map[$partner_id] : 0.0;
+        if (!isset($map[$partner_id])) {
+            return $defaults;
+        }
+
+        $entry = $map[$partner_id];
+
+        // Retrocompatibilità: vecchio formato era un float semplice.
+        if (!is_array($entry)) {
+            return array_merge($defaults, ['amount' => (float) $entry]);
+        }
+
+        return [
+            'amount'          => (float) ($entry['amount'] ?? 0.0),
+            'type'            => in_array($entry['type'] ?? 'fixed', ['fixed', 'percent'], true) ? $entry['type'] : 'fixed',
+            'pay_on_partner'  => !empty($entry['pay_on_partner']),
+        ];
     }
 
     private function set_booking_meta($booking_id, $key, $value) {
@@ -792,7 +810,7 @@ class SOS_PG_Plugin {
         echo '<option value="main" ' . selected($settings['site_role'], 'main', false) . '>Sito principale (gateway)</option>';
         echo '<option value="partner" ' . selected($settings['site_role'], 'partner', false) . '>Sito partner</option>';
         echo '</select>';
-        echo '<p class="description"><strong>Sito principale</strong>: riceve i login firmati, gestisce le prenotazioni LatePoint, invia webhook ai partner.<br>';
+        echo '<p class="description"><strong>Sito principale</strong>: riceve i login firmati, gestisce le prenotazioni, invia webhook ai partner.<br>';
         echo '<strong>Sito partner</strong>: firma e invia le richieste di login al sito principale tramite shortcode o tester.<br>';
         echo '<em>Dopo aver cambiato il ruolo, clicca &quot;Salva impostazioni&quot; per applicare la modalit&agrave;.</em></p>';
         echo '</td></tr>';
@@ -879,22 +897,40 @@ class SOS_PG_Plugin {
         if (!$is_partner) {
             // Sconti partner (solo modalita principale)
             $discounts = $this->get_partner_discounts();
-            echo '<div class="wrap" style="margin-top:24px;"><h2>Sconti Partner</h2>';
-            echo '<p>Imposta lo sconto fisso (in euro) da applicare ai partner. Per HF inserisci 100 per azzerare l\'importo mostrato al cliente.</p>';
+            echo '<div class="wrap" style="margin-top:24px;"><h2>Sconti / Pagamento Partner</h2>';
+            echo '<p>Configura per ogni partner lo sconto e la modalit&agrave; di pagamento.</p>';
+            echo '<ul style="margin-left:1.5em;font-size:.9em;">';
+            echo '<li><strong>Sconto fisso (&euro;)</strong>: sottrae l\'importo indicato dal totale mostrato al cliente sul sito principale.</li>';
+            echo '<li><strong>Sconto % </strong>: applica una percentuale di sconto sul totale.</li>';
+            echo '<li><strong>Pagamento su sito partner</strong>: il cliente non paga sul sito principale (totale = 0), il partner incassa sulla propria piattaforma e invia il callback di conferma. Il webhook include <code>partner_charge</code> con l\'importo originale da incassare.</li>';
+            echo '</ul>';
             echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
             wp_nonce_field('sos_pg_save_discounts');
             echo '<input type="hidden" name="action" value="sos_pg_save_discounts">';
-            echo '<table class="widefat striped"><thead><tr><th>Partner ID</th><th>Sconto (&euro;)</th></tr></thead><tbody>';
-            $rows = $discounts;
-            $rows[''] = '';
-            foreach ($rows as $pid => $amount) {
+            echo '<table class="widefat striped"><thead><tr><th>Partner ID</th><th>Sconto</th><th>Tipo</th><th>Pagamento su sito partner</th></tr></thead><tbody>';
+            $rows_raw = $discounts;
+            $rows_raw[''] = [];
+            foreach ($rows_raw as $pid => $cfg) {
+                // Backward compat: old format was plain float
+                if (!is_array($cfg)) {
+                    $cfg = ['amount' => (float) $cfg, 'type' => 'fixed', 'pay_on_partner' => false];
+                }
+                $d_amount       = isset($cfg['amount']) ? esc_attr((string) $cfg['amount']) : '';
+                $d_type         = isset($cfg['type']) ? $cfg['type'] : 'fixed';
+                $d_pop          = !empty($cfg['pay_on_partner']);
                 echo '<tr>';
                 echo '<td><input type="text" name="discounts[partner_id][]" value="' . esc_attr($pid) . '" class="regular-text" placeholder="es. hf"></td>';
-                echo '<td><input type="number" step="0.01" min="0" name="discounts[amount][]" value="' . esc_attr($amount) . '" class="regular-text" placeholder="es. 100"></td>';
+                echo '<td><input type="number" step="0.01" min="0" name="discounts[amount][]" value="' . $d_amount . '" class="regular-text" style="width:90px;" placeholder="0"></td>';
+                echo '<td><select name="discounts[type][]" style="min-width:90px;">';
+                echo '<option value="fixed" ' . selected($d_type, 'fixed', false) . '>&euro; fisso</option>';
+                echo '<option value="percent" ' . selected($d_type, 'percent', false) . '>% sconto</option>';
+                echo '</select></td>';
+                echo '<td style="text-align:center;"><label><input type="checkbox" name="discounts[pay_on_partner][]" value="' . esc_attr($pid === '' ? '__new__' : $pid) . '" ' . ($d_pop ? 'checked' : '') . '> Abilitato</label></td>';
                 echo '</tr>';
             }
             echo '</tbody></table>';
-            echo '<p><button class="button button-primary" type="submit">Salva sconti partner</button></p>';
+            echo '<p class="description" style="margin-top:6px;">Lascia Sconto = 0 se non si applica nessuno sconto. Il flag &quot;Pagamento su sito partner&quot; &egrave; indipendente dallo sconto.</p>';
+            echo '<p><button class="button button-primary" type="submit">Salva configurazione partner</button></p>';
             echo '</form></div>';
         }
     }
@@ -1092,20 +1128,39 @@ class SOS_PG_Plugin {
 
         check_admin_referer('sos_pg_save_discounts');
 
-        $partner_ids = $_POST['discounts']['partner_id'] ?? [];
-        $amounts = $_POST['discounts']['amount'] ?? [];
+        $partner_ids    = $_POST['discounts']['partner_id']      ?? [];
+        $amounts        = $_POST['discounts']['amount']           ?? [];
+        $types          = $_POST['discounts']['type']             ?? [];
+        $pop_values     = (array) ($_POST['discounts']['pay_on_partner'] ?? []);
+
+        // pay_on_partner è inviato come array di partner_id checked.
+        $pop_set = [];
+        foreach ($pop_values as $v) {
+            $pop_set[sanitize_text_field(wp_unslash($v))] = true;
+        }
 
         $map = [];
-        if (is_array($partner_ids) && is_array($amounts)) {
+        if (is_array($partner_ids)) {
             foreach ($partner_ids as $idx => $pid_raw) {
-                $pid = sanitize_text_field(wp_unslash($pid_raw));
-                $amount = isset($amounts[$idx]) ? (float) wp_unslash($amounts[$idx]) : 0.0;
+                $pid    = sanitize_text_field(wp_unslash($pid_raw));
+                $amount = isset($amounts[$idx]) ? round((float) wp_unslash($amounts[$idx]), 4) : 0.0;
+                $type   = isset($types[$idx]) && wp_unslash($types[$idx]) === 'percent' ? 'percent' : 'fixed';
+                $pop    = isset($pop_set[$pid]) || ($pid === '' && isset($pop_set['__new__']));
 
-                if ($pid === '' || $amount <= 0) {
+                if ($pid === '') {
                     continue;
                 }
 
-                $map[$pid] = round($amount, 2);
+                // Salva solo se c'è uno sconto oppure il flag pay_on_partner è attivo.
+                if ($amount <= 0 && !$pop) {
+                    continue;
+                }
+
+                $map[$pid] = [
+                    'amount'         => $amount,
+                    'type'           => $type,
+                    'pay_on_partner' => $pop,
+                ];
             }
         }
 
@@ -1225,14 +1280,28 @@ class SOS_PG_Plugin {
     }
 
     public function apply_partner_discount($amount, $booking = null, $apply_coupons = null) {
-        $discount = $this->get_partner_discount_amount();
+        $config = $this->get_partner_discount_config();
 
-        if ($discount <= 0) {
+        if ($config['pay_on_partner']) {
+            // Forza il totale a 0 sul sito principale: il pagamento avviene sul portale del partner.
+            // Cattura l'importo originale per includerlo nel webhook (partner_charge).
+            if (in_array(current_filter(), ['latepoint_full_amount', 'latepoint_full_amount_for_service'], true)) {
+                $this->partner_original_total = max(0.0, (float) $amount);
+            }
+            return 0.0;
+        }
+
+        if ($config['amount'] <= 0) {
             return $amount;
         }
 
-        $new_amount = max(0, (float) $amount - $discount);
-        return $new_amount;
+        if ($config['type'] === 'percent') {
+            $discount = (float) $amount * ($config['amount'] / 100.0);
+            return max(0.0, (float) $amount - $discount);
+        }
+
+        // Sconto fisso in euro.
+        return max(0.0, (float) $amount - $config['amount']);
     }
 
     public function handle_save_routes() {
@@ -1456,6 +1525,16 @@ class SOS_PG_Plugin {
         $start_time = $this->safe_get($booking, 'start_time');
         $end_time = $this->safe_get($booking, 'end_time');
         $total = (float) $this->safe_get($booking, 'total', 0);
+
+        // Rileva se il pagamento avviene sul portale partner (pay_on_partner).
+        $discount_config  = $this->get_partner_discount_config($partner_id);
+        $partner_charge   = null;
+        if ($discount_config['pay_on_partner'] && $this->partner_original_total !== null) {
+            // Non azzera partner_original_total: handle_booking_created può essere richiamata
+            // da entrambi gli hook (latepoint_after_create_booking e latepoint_booking_created)
+            // per lo stesso booking nella stessa request, quindi il valore deve restare disponibile.
+            $partner_charge = $this->partner_original_total;
+        }
         $customer_email = $this->safe_get_nested($booking, ['customer', 'email']);
         $customer_phone = $this->safe_get_nested($booking, ['customer', 'phone']);
         $customer_name = $this->safe_get_nested($booking, ['customer', 'full_name']);
@@ -1508,6 +1587,14 @@ class SOS_PG_Plugin {
             'start_time' => $start_time,
             'customer_email' => $customer_email,
         ];
+
+        // Se il pagamento è sul portale del partner, includi l'importo da incassare.
+        // total = 0 (il sito principale non incassa); partner_charge = importo originale del servizio.
+        if ($partner_charge !== null) {
+            $partner_payload['partner_charge'] = $partner_charge;
+            $partner_payload['pay_on_partner'] = true;
+        }
+
         $this->send_partner_webhook($partner_id, $partner_payload);
     }
 
@@ -1776,7 +1863,7 @@ class SOS_PG_Plugin {
                 $is_free    = $last_total === 0.0;
                 if ($is_free) {
                     echo '<div style="margin-top:8px;padding:8px 12px;background:#e8f5e9;border:1px solid #a5d6a7;border-radius:3px;">';
-                    echo '<strong>&#10004; Prenotazione gratuita (totale 0 &euro;)</strong> &mdash; La conferma pagamento viene inviata automaticamente.';
+                    echo '<strong>&#10004; Prenotazione gratuita (totale 0 &euro;)</strong> &mdash; <em>Solo in questo Tester</em>: la conferma pagamento viene inviata automaticamente per verificare il flusso.';
                     echo '</div>';
                     if (empty($last['auto_confirmed'])) {
                         echo '<form id="sosPgAutoFreeForm" method="post" style="display:none;">';

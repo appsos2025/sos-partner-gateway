@@ -33,6 +33,8 @@ partner_id|payload|timestamp|nonce
   - service_id, start_date, start_time, total
   - customer_email
   - location_id = ID della location associata al partner nel sistema
+  - **partner_charge** (presente solo se `pay_on_partner = true`): importo che il partner deve incassare dal cliente
+  - **pay_on_partner** (presente solo se attivo): `true` = il pagamento avviene sul portale del partner
 
 ## Callback pagamento (dal partner al gateway)
 - Endpoint: /partner-payment-callback (slug configurabile nelle impostazioni)
@@ -43,22 +45,31 @@ partner_id|payload|timestamp|nonce
   - transaction_id (facoltativo)
   - partner_id (facoltativo)
 - Effetto: imposta status = payment_success_status configurato e payment_status = paid nel sistema di prenotazione.
+- **Il callback è richiesto SOLO quando `pay_on_partner = true`** (il partner gestisce il pagamento). Se il cliente ha pagato direttamente sul sito principale, il flusso si chiude automaticamente dopo il pagamento.
 
-## Flusso prenotazione gratuita (sconto 100%, total = 0)
+## Modalità di pagamento per partner
 
-Quando il partner ha uno sconto del 100%, il totale nel webhook sarà `total: 0`.
-In questo caso il pagamento avviene esclusivamente sul sito del partner (fuori dal gateway SOS),
-oppure non è richiesto affatto. **Il partner deve comunque inviare il callback di conferma** al gateway
-per aggiornare lo stato della prenotazione nel sistema.
+### Pagamento sul sito principale (default)
+Il cliente paga tramite il checkout del sito principale. Nessun callback richiesto dal partner.
 
-Il file `tools/integration-example/webhook-receiver.php` mostra come ricevere il webhook e
-confermare il pagamento tramite dashboard. Per automatizzare l'invio del callback alla ricezione
-del webhook (ad esempio per le prenotazioni gratuite), puoi aggiungere nella tua piattaforma:
+### Pagamento sul portale del partner (`pay_on_partner = true`)
+Il totale sul sito principale è impostato a 0 (il cliente non paga lì). Il webhook include:
+- `total: 0` — il sito principale non incassa
+- `partner_charge: <importo>` — l'importo che il partner deve incassare dal cliente
+
+Il partner incassa il pagamento sulla propria piattaforma e invia il callback di conferma al gateway.
+
+### Prenotazione con sconto o gratuita
+Se è configurato uno sconto (fisso in € o percentuale %), il totale viene ridotto prima del checkout.
+Se il totale risultante è 0, il partner deve comunque inviare il callback per aggiornare lo stato.
 
 ```php
-// Alla ricezione del webhook, opzionalmente per i casi gratuiti (total = 0)
-if ((float)$data['total'] === 0.0) {
-    send_payment_confirmation($data['booking_id'], 'FREE-' . $data['booking_id'], $data['partner_id']);
+// Alla ricezione del webhook, gestione per prenotazione con pay_on_partner
+if (!empty($data['pay_on_partner'])) {
+    $amount_to_charge = $data['partner_charge'] ?? 0;
+    // ... gestisci il pagamento sulla tua piattaforma ...
+    // Dopo l'incasso, invia il callback:
+    send_payment_confirmation($data['booking_id'], 'TX-' . $data['booking_id'], $data['partner_id']);
 }
 ```
 

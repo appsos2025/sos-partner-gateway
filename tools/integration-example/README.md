@@ -97,7 +97,9 @@ curl -X POST https://<dominio-gateway>/partner-payment-callback/ \
   "partner_id": "<id-partner>",
   "booking_id": 42,
   "status": "pending",
-  "total": 50.00,
+  "total": 0,
+  "partner_charge": 100.00,
+  "pay_on_partner": true,
   "service_id": 1,
   "location_id": 2,
   "start_date": "2026-04-01",
@@ -106,7 +108,18 @@ curl -X POST https://<dominio-gateway>/partner-payment-callback/ \
 }
 ```
 
-> **Nota**: `location_id` identifica la location del partner nel sistema SOS. Ogni partner ha la propria location dedicata. Se `total` è `0`, la prenotazione è gratuita; invia comunque il callback di conferma (tramite dashboard o logica propria) per aggiornare lo stato nel sistema.
+Campi rilevanti per il pagamento:
+
+| Campo | Tipo | Descrizione |
+|---|---|---|
+| `total` | float | Totale addebitato sul sito principale (0 se il pagamento è gestito dal partner) |
+| `partner_charge` | float | **Importo che il partner deve incassare** (presente solo se `pay_on_partner = true`) |
+| `pay_on_partner` | bool | `true` = il partner gestisce il pagamento; invia il callback dopo l'incasso |
+
+**Logica di pagamento:**
+- `pay_on_partner = false` e `total > 0` → il cliente ha già pagato sul sito principale, nessun callback richiesto dal partner
+- `pay_on_partner = true` → il cliente paga sul portale partner; il partner **deve** inviare il callback di conferma con `booking_id` e `transaction_id`
+- `total = 0` e `pay_on_partner` non presente → prenotazione gratuita; il partner deve comunque inviare il callback
 
 ## Payload callback pagamento da inviare
 
