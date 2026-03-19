@@ -89,3 +89,49 @@ Ogni portale deve configurare:
 - URL webhook per ricevere le prenotazioni
 - Secret HMAC per la verifica firma
 - URL e secret per inviare il callback di pagamento
+
+## Shortcode [sos_partner_prenota] — pulsante "Prenota" self-service
+
+Per lo scenario in cui il **proprietario del sito** vuole aggiungere un pulsante
+"Prenota" direttamente su una pagina WordPress propria (senza un portale partner
+separato), è disponibile lo shortcode `[sos_partner_prenota]`.
+
+### Configurazione (Impostazioni → SOS Partner Gateway)
+- **Partner ID self-use**: il `partner_id` da usare per le richieste firmate dallo shortcode
+- **Chiave privata self-use (PEM)**: la chiave privata ECC che firma la richiesta — deve
+  corrispondere alla chiave pubblica configurata per la verifica
+
+### Utilizzo shortcode
+
+```
+[sos_partner_prenota]
+[sos_partner_prenota partner_id="hf" label="Prenota una visita"]
+[sos_partner_prenota partner_id="hf" label="Prenota" email_field="no"]
+```
+
+| Attributo    | Default                  | Descrizione |
+|---|---|---|
+| `partner_id` | `self_login_partner_id`  | Partner ID; sovrascrive quello nelle impostazioni |
+| `label`      | `Prenota`                | Testo del pulsante |
+| `email_field`| `yes` (non loggato)      | `yes` = mostra campo email; `no` = usa email WP dell'utente loggato |
+| `class`      | vuoto                    | Classi CSS aggiuntive sul form |
+
+### Flusso tecnico
+
+1. Il visitatore compila email (se richiesta) e clicca il pulsante
+2. Il form fa POST a `/?sos_pg_book_now=1` (endpoint interno al plugin)
+3. Il plugin firma la richiesta con la chiave privata e fa auto-POST a `/partner-login/`
+4. Il gateway autentica → crea/aggiorna utente WP → redirige alla pagina booking del partner
+5. Il cliente completa la prenotazione su LatePoint
+
+### Errori mostrati in-page (solo ad admin)
+- Chiave privata non configurata
+- Partner ID mancante
+
+### Errori di invio (parametro `sos_pg_err` nella URL)
+| Codice | Messaggio |
+|---|---|
+| `email` | Email non valida |
+| `partner` | Partner ID mancante |
+| `key` | Chiave privata non configurata o non valida |
+| `sign` | Errore di firma |

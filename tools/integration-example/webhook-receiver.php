@@ -78,7 +78,9 @@ function handle_incoming_webhook() {
     // Salva la prenotazione ricevuta
     save_booking($data);
 
-    // Prenotazione gratuita (totale 0): auto-conferma il pagamento senza intervento umano.
+    // Prenotazione gratuita (sconto 100%, totale 0): nessun pagamento richiesto.
+    // Il gateway non aggiorna lo stato finché non riceve il callback di conferma, quindi
+    // lo inviamo immediatamente — è sicuro perché non c'è alcuna transazione finanziaria da verificare.
     $total = (float) ($data['total'] ?? -1);
     if ($total === 0.0) {
         send_payment_confirmation((int) $data['booking_id'], 'FREE-' . $data['booking_id'], $data['partner_id'] ?? '');

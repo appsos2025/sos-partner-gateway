@@ -17,7 +17,16 @@
 - [x] Tester callback pagamento da admin
 - [x] `location_id` nel payload webhook (sostituisce il campo custom `cf_910bA88i`)
 
-## Fase 3 — F+H
+## Fase 4 — Shortcode [sos_partner_prenota] (multi-portale self-service)
+- [x] Impostazioni: `self_login_private_key_pem` (chiave privata ECC per firma self-use)
+- [x] Impostazioni: `self_login_partner_id` (partner ID di default per lo shortcode)
+- [x] Mini-endpoint `/?sos_pg_book_now=1` — accetta POST, firma la richiesta lato server, auto-POST a `/partner-login/`
+- [x] Shortcode `[sos_partner_prenota partner_id="..." label="..." email_field="yes/no"]`
+  - Mostra campo email se visitatore non loggato
+  - Usa email WP se utente già loggato
+  - Mostra avviso admin se chiave privata o partner_id non configurati
+  - Warning inline se invio fallisce (email non valida, chiave mancante, ecc.)
+
 - [x] Pagina dedicata `/prenotazioni-fh/`
 - [x] Stato LatePoint dedicato `F+H`
 - [x] Location LatePoint dedicata `F+H` (usata per differenziare partner)
