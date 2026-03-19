@@ -78,14 +78,9 @@ function handle_incoming_webhook() {
     // Salva la prenotazione ricevuta
     save_booking($data);
 
-    // Prenotazione gratuita (sconto 100%, totale 0): nessun pagamento richiesto.
-    // Il gateway non aggiorna lo stato finché non riceve il callback di conferma, quindi
-    // lo inviamo immediatamente — è sicuro perché non c'è alcuna transazione finanziaria da verificare.
-    $total = (float) ($data['total'] ?? -1);
-    if ($total === 0.0) {
-        send_payment_confirmation((int) $data['booking_id'], 'FREE-' . $data['booking_id'], $data['partner_id'] ?? '');
-        mark_booking_paid((int) $data['booking_id'], 'auto-free');
-    }
+    // Nota: anche le prenotazioni gratuite (total = 0) richiedono il callback di conferma.
+    // Usa il pulsante "Conferma pagamento" nella dashboard, oppure implementa l'invio
+    // automatico nella tua piattaforma dopo aver verificato le tue logiche di business.
 
     http_response_code(200);
     header('Content-Type: application/json');
@@ -237,9 +232,10 @@ function render_dashboard() {
 <div class="note">
     <strong>Come funziona:</strong>
     Il gateway invia un webhook <code>booking_created</code> a questo URL ogni volta che un cliente prenota.
-    Se il totale &egrave; <strong>0 &euro;</strong> (sconto 100%), la conferma viene inviata automaticamente.
-    Se il totale &egrave; positivo, il pagamento avviene sulla tua piattaforma e devi cliccare <em>Conferma pagamento</em>
-    per comunicare al gateway che il pagamento &egrave; andato a buon fine.
+    Per ogni prenotazione ricevuta &mdash; sia gratuita (totale 0 &euro;) sia a pagamento &mdash;
+    devi cliccare <em>Conferma pagamento</em> dopo che il cliente ha pagato (o dopo aver verificato
+    che non &egrave; richiesto alcun pagamento). Il callback di conferma comunica al gateway che
+    la prenotazione &egrave; confermata e aggiorna lo stato nel sistema.
 </div>
 
 <div class="webhook-url">

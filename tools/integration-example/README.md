@@ -33,10 +33,11 @@ Gateway SOS                    Piattaforma partner
 ## Flusso prenotazione gratuita (sconto 100%, total = 0)
 
 Quando il partner ha uno sconto del 100%, `total` nel webhook sarà `0`.
-In questo caso `webhook-receiver.php` **invia automaticamente** il callback di conferma
-senza richiedere intervento umano. Lo stato viene aggiornato su LatePoint immediatamente.
+Anche in questo caso **è necessario inviare il callback di conferma** al gateway, tramite il
+pulsante "Conferma pagamento" nella dashboard oppure con la tua logica applicativa.
+Lo stato della prenotazione viene aggiornato solo alla ricezione del callback.
 
-Per implementare lo stesso comportamento nella tua piattaforma:
+Per implementare l'invio automatico nella tua piattaforma (opzionale):
 ```php
 if ((float)$data['total'] === 0.0) {
     send_payment_confirmation($data['booking_id'], 'FREE-'.$data['booking_id'], $data['partner_id']);
@@ -105,7 +106,7 @@ curl -X POST https://<dominio-gateway>/partner-payment-callback/ \
 }
 ```
 
-> **Nota**: `location_id` è l'ID della posizione LatePoint usato per identificare il partner sul sistema SOS. Ogni partner ha la propria location dedicata. Se `total` è `0`, la prenotazione è gratuita e la conferma viene inviata automaticamente.
+> **Nota**: `location_id` identifica la location del partner nel sistema SOS. Ogni partner ha la propria location dedicata. Se `total` è `0`, la prenotazione è gratuita; invia comunque il callback di conferma (tramite dashboard o logica propria) per aggiornare lo stato nel sistema.
 
 ## Payload callback pagamento da inviare
 
