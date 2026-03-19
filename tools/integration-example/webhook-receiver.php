@@ -78,6 +78,13 @@ function handle_incoming_webhook() {
     // Salva la prenotazione ricevuta
     save_booking($data);
 
+    // Prenotazione gratuita (totale 0): auto-conferma il pagamento senza intervento umano.
+    $total = (float) ($data['total'] ?? -1);
+    if ($total === 0.0) {
+        send_payment_confirmation((int) $data['booking_id'], 'FREE-' . $data['booking_id'], $data['partner_id'] ?? '');
+        mark_booking_paid((int) $data['booking_id'], 'auto-free');
+    }
+
     http_response_code(200);
     header('Content-Type: application/json');
     echo json_encode(['ok' => true]);
@@ -145,6 +152,9 @@ function handle_send_payment() {
     $result = send_payment_confirmation($booking_id, $transaction_id, $partner_id);
 
     $ok = $result['http_code'] >= 200 && $result['http_code'] < 300;
+    if ($ok) {
+        mark_booking_paid($booking_id, $transaction_id);
+    }
     header('Location: ?action=list&paid=' . ($ok ? '1' : '0') . '&booking_id=' . $booking_id . '&http=' . $result['http_code']);
     exit;
 }
@@ -158,6 +168,17 @@ function save_booking(array $data) {
     $id = (int) $data['booking_id'];
     $bookings[$id] = array_merge($bookings[$id] ?? [], $data, ['received_at' => gmdate('Y-m-d H:i:s')]);
     file_put_contents(SOS_BOOKINGS_FILE, json_encode($bookings, JSON_PRETTY_PRINT));
+}
+
+function mark_booking_paid($booking_id, $transaction_id = '') {
+    $bookings = load_bookings();
+    $id = (int) $booking_id;
+    if (isset($bookings[$id])) {
+        $bookings[$id]['payment_sent']    = true;
+        $bookings[$id]['transaction_id']  = $transaction_id;
+        $bookings[$id]['payment_sent_at'] = gmdate('Y-m-d H:i:s');
+        file_put_contents(SOS_BOOKINGS_FILE, json_encode($bookings, JSON_PRETTY_PRINT));
+    }
 }
 
 function load_bookings() {
@@ -206,10 +227,18 @@ function render_dashboard() {
         .btn:hover { background: #005d8c; }
         code { background: #f0f0f0; padding: 2px 5px; border-radius: 3px; font-size: .85em; }
         .webhook-url { background: #fffbe6; border: 1px solid #ffe58f; padding: 10px 16px; border-radius: 4px; margin-bottom: 20px; }
+        .note { background: #e3f2fd; border: 1px solid #90caf9; padding: 10px 16px; border-radius: 4px; margin-bottom: 16px; font-size: .9em; }
     </style>
 </head>
 <body>
 <h1>SOS Partner Gateway — Integrazione partner (esempio)</h1>
+<div class="note">
+    <strong>Come funziona:</strong>
+    Il gateway invia un webhook <code>booking_created</code> a questo URL ogni volta che un cliente prenota.
+    Se il totale &egrave; <strong>0 &euro;</strong> (sconto 100%), la conferma viene inviata automaticamente.
+    Se il totale &egrave; positivo, il pagamento avviene sulla tua piattaforma e devi cliccare <em>Conferma pagamento</em>
+    per comunicare al gateway che il pagamento &egrave; andato a buon fine.
+</div>
 
 <div class="webhook-url">
     <strong>URL webhook da configurare nel gateway SOS:</strong><br>
@@ -240,27 +269,45 @@ function render_dashboard() {
             <th>Totale</th>
             <th>Email cliente</th>
             <th>Stato</th>
+            <th>Pagamento</th>
             <th>Azione</th>
         </tr>
     </thead>
     <tbody>
     <?php foreach ($bookings as $bid => $b): ?>
+        <?php
+            $is_free_row    = (float)($b['total'] ?? -1) === 0.0;
+            $is_paid_row    = !empty($b['payment_sent']);
+            $row_total_fmt  = $is_free_row ? '<span style="color:#2e7d32;font-weight:600;">Gratuita</span>' : h(number_format((float)($b['total'] ?? 0), 2)) . ' &euro;';
+        ?>
         <tr>
             <td><?= h($bid) ?></td>
             <td><?= h($b['received_at'] ?? '') ?></td>
             <td><?= h($b['partner_id'] ?? '') ?></td>
             <td><?= h($b['location_id'] ?? '') ?></td>
             <td><?= h($b['start_date'] ?? '') ?> <?= h($b['start_time'] ?? '') ?></td>
-            <td><?= h(number_format((float)($b['total'] ?? 0), 2)) ?> €</td>
+            <td><?= $row_total_fmt ?></td>
             <td><?= h($b['customer_email'] ?? '') ?></td>
             <td><?= h($b['status'] ?? '') ?></td>
             <td>
-                <form method="post" action="?action=pay">
-                    <input type="hidden" name="booking_id" value="<?= h($bid) ?>">
-                    <input type="hidden" name="partner_id" value="<?= h($b['partner_id'] ?? '') ?>">
-                    <input type="hidden" name="transaction_id" value="PAY-<?= h($bid) ?>-<?= time() ?>">
-                    <button class="btn" type="submit">Conferma pagamento</button>
-                </form>
+                <?php if ($is_paid_row): ?>
+                    <span style="color:#2e7d32;">&#10004; Confermato</span><br>
+                    <small style="color:#888;"><?= h($b['payment_sent_at'] ?? '') ?></small>
+                <?php else: ?>
+                    <span style="color:#e65100;">In attesa</span>
+                <?php endif; ?>
+            </td>
+            <td>
+                <?php if ($is_paid_row): ?>
+                    <span style="color:#aaa;font-size:.85em;">&#10004; Callback inviato</span>
+                <?php else: ?>
+                    <form method="post" action="?action=pay">
+                        <input type="hidden" name="booking_id" value="<?= h($bid) ?>">
+                        <input type="hidden" name="partner_id" value="<?= h($b['partner_id'] ?? '') ?>">
+                        <input type="hidden" name="transaction_id" value="PAY-<?= h($bid) ?>-<?= time() ?>">
+                        <button class="btn" type="submit"><?= $is_free_row ? 'Conferma (gratuita)' : 'Conferma pagamento' ?></button>
+                    </form>
+                <?php endif; ?>
             </td>
         </tr>
     <?php endforeach; ?>

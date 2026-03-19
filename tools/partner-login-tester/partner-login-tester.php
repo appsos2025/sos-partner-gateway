@@ -141,14 +141,35 @@ class SOS_PG_Partner_Login_Tester {
             echo '<p>' . $sig_label . ' &mdash; ' . esc_html($last['received_at'] ?? '') . '</p>';
             echo '<pre style="max-height:240px;overflow:auto;background:#f6f6f6;padding:8px;border:1px solid #ddd;">' . esc_html(wp_json_encode($last['body'] ?? $last, JSON_PRETTY_PRINT)) . '</pre>';
             if ($last_booking_id) {
-                echo '<form method="post" style="margin-top:8px;">';
-                wp_nonce_field('sos_pg_tester_pay');
-                echo '<input type="hidden" name="sos_pg_tester_action" value="pay">';
-                echo '<input type="hidden" name="pay_booking_id" value="' . esc_attr($last_booking_id) . '">';
-                echo '<input type="hidden" name="pay_partner_id" value="' . esc_attr($last['body']['partner_id'] ?? $settings['partner_id']) . '">';
-                echo '<input type="hidden" name="pay_tx" value="AUTO-' . esc_attr(time()) . '">';
-                echo '<button class="button button-primary" type="submit">&#10003; Conferma pagamento per prenotazione #' . esc_html($last_booking_id) . '</button>';
-                echo '</form>';
+                $last_total = (float) ($last['body']['total'] ?? -1);
+                $is_free    = $last_total === 0.0;
+                if ($is_free) {
+                    // Prenotazione gratuita (sconto 100%) — conferma automaticamente senza pagamento.
+                    echo '<div style="margin-top:8px;padding:8px 12px;background:#e8f5e9;border:1px solid #a5d6a7;border-radius:3px;">';
+                    echo '<strong>&#10004; Prenotazione gratuita (totale 0 &euro;)</strong> &mdash; Il callback di conferma viene inviato automaticamente senza attendere il pagamento.';
+                    echo '</div>';
+                    echo '<form id="sosPgAutoFreeForm" method="post" style="display:none;">';
+                    wp_nonce_field('sos_pg_tester_pay');
+                    echo '<input type="hidden" name="sos_pg_tester_action" value="pay">';
+                    echo '<input type="hidden" name="pay_booking_id" value="' . esc_attr($last_booking_id) . '">';
+                    echo '<input type="hidden" name="pay_partner_id" value="' . esc_attr($last['body']['partner_id'] ?? $settings['partner_id']) . '">';
+                    echo '<input type="hidden" name="pay_tx" value="FREE-' . esc_attr($last_booking_id) . '">';
+                    echo '</form>';
+                    echo '<script>document.addEventListener("DOMContentLoaded",function(){document.getElementById("sosPgAutoFreeForm").submit();});</script>';
+                } else {
+                    echo '<div style="margin-top:8px;padding:6px 12px;background:#fff3cd;border:1px solid #ffc107;border-radius:3px;font-size:.85em;">';
+                    echo '&#9888; <strong>Solo test interno</strong> &mdash; questo pulsante simula la conferma pagamento. ';
+                    echo 'In produzione il partner deve inviare la conferma dalla propria piattaforma.';
+                    echo '</div>';
+                    echo '<form method="post" style="margin-top:6px;">';
+                    wp_nonce_field('sos_pg_tester_pay');
+                    echo '<input type="hidden" name="sos_pg_tester_action" value="pay">';
+                    echo '<input type="hidden" name="pay_booking_id" value="' . esc_attr($last_booking_id) . '">';
+                    echo '<input type="hidden" name="pay_partner_id" value="' . esc_attr($last['body']['partner_id'] ?? $settings['partner_id']) . '">';
+                    echo '<input type="hidden" name="pay_tx" value="TEST-' . esc_attr(time()) . '">';
+                    echo '<button class="button" type="submit">[TEST] &#10003; Conferma pagamento per prenotazione #' . esc_html($last_booking_id) . '</button>';
+                    echo '</form>';
+                }
             }
         } else {
             echo '<p>Nessun webhook ricevuto.</p>';
@@ -157,7 +178,7 @@ class SOS_PG_Partner_Login_Tester {
         echo '<hr style="margin:24px 0;">';
 
         echo '<h2>Invia callback pagamento (manuale)</h2>';
-        echo '<p>Compila manualmente i campi o usa il pulsante rapido sopra per confermare l\'ultimo booking ricevuto via webhook.</p>';
+        echo '<p>Usa il modulo manuale per inviare un callback firmato. Se hai ricevuto un webhook con prenotazione gratuita (totale 0 &euro;) la conferma viene inviata automaticamente.</p>';
         echo '<form method="post">';
         wp_nonce_field('sos_pg_tester_pay');
         echo '<input type="hidden" name="sos_pg_tester_action" value="pay">';

@@ -18,8 +18,9 @@ Gateway SOS                    Piattaforma partner
      │  + header X-SOSPG-Signature    │
      │ ─────────────────────────────► │  1. Riceve e verifica HMAC
      │                                │  2. Salva la prenotazione
-     │                                │  3. Mostra all'operatore
-     │                                │  4. Operatore accetta pagamento
+     │                                │  3. Se total=0 → auto-conferma
+     │                                │     Se total>0 → attende pagamento
+     │                                │  4. Operatore/utente paga
      │  POST /partner-payment-callback│
      │  { booking_id, transaction_id }│
      │  + header X-SOSPG-Signature    │
@@ -27,6 +28,19 @@ Gateway SOS                    Piattaforma partner
      │
      │  Aggiorna stato booking        │
      │  payment_status = paid         │
+```
+
+## Flusso prenotazione gratuita (sconto 100%, total = 0)
+
+Quando il partner ha uno sconto del 100%, `total` nel webhook sarà `0`.
+In questo caso `webhook-receiver.php` **invia automaticamente** il callback di conferma
+senza richiedere intervento umano. Lo stato viene aggiornato su LatePoint immediatamente.
+
+Per implementare lo stesso comportamento nella tua piattaforma:
+```php
+if ((float)$data['total'] === 0.0) {
+    send_payment_confirmation($data['booking_id'], 'FREE-'.$data['booking_id'], $data['partner_id']);
+}
 ```
 
 ## Setup rapido
@@ -91,7 +105,7 @@ curl -X POST https://<dominio-gateway>/partner-payment-callback/ \
 }
 ```
 
-> **Nota**: `location_id` è l'ID della posizione LatePoint usato per identificare il partner sul sistema SOS. Ogni partner ha la propria location dedicata.
+> **Nota**: `location_id` è l'ID della posizione LatePoint usato per identificare il partner sul sistema SOS. Ogni partner ha la propria location dedicata. Se `total` è `0`, la prenotazione è gratuita e la conferma viene inviata automaticamente.
 
 ## Payload callback pagamento da inviare
 
