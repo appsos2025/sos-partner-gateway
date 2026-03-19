@@ -810,9 +810,14 @@ class SOS_PG_Plugin {
         echo '<option value="main" ' . selected($settings['site_role'], 'main', false) . '>Sito principale (gateway)</option>';
         echo '<option value="partner" ' . selected($settings['site_role'], 'partner', false) . '>Sito partner</option>';
         echo '</select>';
-        echo '<p class="description"><strong>Sito principale</strong>: riceve i login firmati, gestisce le prenotazioni, invia webhook ai partner.<br>';
-        echo '<strong>Sito partner</strong>: firma e invia le richieste di login al sito principale tramite shortcode o tester.<br>';
-        echo '<em>Dopo aver cambiato il ruolo, clicca &quot;Salva impostazioni&quot; per applicare la modalit&agrave;.</em></p>';
+        if ($is_partner) {
+            echo '<p class="description"><em>Modalit&agrave; attiva: <strong>Sito partner</strong>.</em> Cambia in &quot;Sito principale&quot; solo se questo sito deve gestire direttamente le prenotazioni.<br>';
+            echo '<em>Dopo aver cambiato il ruolo, clicca &quot;Salva impostazioni&quot;.</em></p>';
+        } else {
+            echo '<p class="description"><strong>Sito principale</strong>: riceve i login firmati, gestisce le prenotazioni, invia webhook ai partner.<br>';
+            echo '<strong>Sito partner</strong>: firma e invia le richieste di login al sito principale tramite shortcode o tester.<br>';
+            echo '<em>Dopo aver cambiato il ruolo, clicca &quot;Salva impostazioni&quot; per applicare la modalit&agrave;.</em></p>';
+        }
         echo '</td></tr>';
 
         if ($is_partner) {
@@ -861,8 +866,6 @@ class SOS_PG_Plugin {
             echo '<input type="text" class="regular-text" name="partner_callback_secret" value="' . esc_attr($settings['partner_callback_secret']) . '" placeholder="secret condiviso con il sito principale">';
             echo '<p class="description">Secret per firmare le richieste di conferma pagamento inviate al sito principale.</p>';
             echo '</td></tr>';
-
-            echo '<tr><th>Debug logs sviluppo</th><td><label><input type="checkbox" name="debug_logging_enabled" value="1" ' . checked(!empty($settings['debug_logging_enabled']), true, false) . '> Attiva</label></td></tr>';
         } else {
             // --- Modalita sito principale: impostazioni complete ---
             echo '<tr><th>Slug endpoint login</th><td><input type="text" class="regular-text" name="endpoint_slug" value="' . esc_attr($settings['endpoint_slug']) . '"></td></tr>';
@@ -1057,7 +1060,6 @@ class SOS_PG_Plugin {
         $settings['site_role'] = in_array($new_role, ['main', 'partner'], true) ? $new_role : 'main';
 
         // Campi comuni a entrambe le modalità.
-        $settings['debug_logging_enabled'] = !empty($_POST['debug_logging_enabled']) ? 1 : 0;
         $settings['self_login_private_key_pem'] = trim((string) wp_unslash($_POST['self_login_private_key_pem'] ?? ''));
         $settings['self_login_partner_id'] = sanitize_text_field(wp_unslash($_POST['self_login_partner_id'] ?? ''));
         $settings['self_login_endpoint_url'] = esc_url_raw(trim((string) wp_unslash($_POST['self_login_endpoint_url'] ?? '')));
@@ -1069,6 +1071,7 @@ class SOS_PG_Plugin {
             $settings['partner_callback_secret'] = sanitize_text_field(wp_unslash($_POST['partner_callback_secret'] ?? ''));
         } else {
             // Campi presenti solo nel form del sito principale.
+            $settings['debug_logging_enabled'] = !empty($_POST['debug_logging_enabled']) ? 1 : 0;
             $settings['endpoint_slug'] = sanitize_title(wp_unslash($_POST['endpoint_slug'] ?? 'partner-login'));
             $settings['courtesy_page_id'] = absint($_POST['courtesy_page_id'] ?? 0);
             $settings['max_fail_short'] = max(1, absint($_POST['max_fail_short'] ?? 10));
