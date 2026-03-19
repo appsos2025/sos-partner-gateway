@@ -1066,9 +1066,19 @@ class SOS_PG_Plugin {
 
         if ($settings['site_role'] === 'partner') {
             // Campi presenti solo nel form del sito partner.
-            $settings['partner_webhook_secret'] = sanitize_text_field(wp_unslash($_POST['partner_webhook_secret'] ?? ''));
-            $settings['partner_callback_url'] = esc_url_raw(trim((string) wp_unslash($_POST['partner_callback_url'] ?? '')));
-            $settings['partner_callback_secret'] = sanitize_text_field(wp_unslash($_POST['partner_callback_secret'] ?? ''));
+            // Si usa isset() per preservare i valori già salvati quando il POST proviene
+            // dal form del sito principale (scenario: l'admin cambia il selettore ruolo
+            // da "main" a "partner" e salva — il form visualizzato era quello del sito
+            // principale e non include questi campi specifici del partner).
+            if (isset($_POST['partner_webhook_secret'])) {
+                $settings['partner_webhook_secret'] = sanitize_text_field(wp_unslash($_POST['partner_webhook_secret']));
+            }
+            if (isset($_POST['partner_callback_url'])) {
+                $settings['partner_callback_url'] = esc_url_raw(trim((string) wp_unslash($_POST['partner_callback_url'])));
+            }
+            if (isset($_POST['partner_callback_secret'])) {
+                $settings['partner_callback_secret'] = sanitize_text_field(wp_unslash($_POST['partner_callback_secret']));
+            }
         } else {
             // Campi presenti solo nel form del sito principale.
             $settings['debug_logging_enabled'] = !empty($_POST['debug_logging_enabled']) ? 1 : 0;
