@@ -821,7 +821,7 @@ class SOS_PG_Plugin {
         echo '</td></tr>';
 
         if ($is_partner) {
-            // --- Modalita partner: solo campi rilevanti ---
+            // --- Modalità partner: solo campi rilevanti ---
             echo '<tr><th colspan="2"><hr style="margin:4px 0;"><strong>Configurazione sito partner</strong>';
             echo '<p class="description" style="font-weight:normal;">Questi sono gli unici dati necessari sul sito partner. Il sito principale gestisce tutto il resto.</p></th></tr>';
 
@@ -867,7 +867,7 @@ class SOS_PG_Plugin {
             echo '<p class="description">Secret per firmare le richieste di conferma pagamento inviate al sito principale.</p>';
             echo '</td></tr>';
         } else {
-            // --- Modalita sito principale: impostazioni complete ---
+            // --- Modalità sito principale: impostazioni complete ---
             echo '<tr><th>Slug endpoint login</th><td><input type="text" class="regular-text" name="endpoint_slug" value="' . esc_attr($settings['endpoint_slug']) . '"></td></tr>';
 
             echo '<tr><th>Pagina di cortesia</th><td><select name="courtesy_page_id"><option value="0">&mdash; Nessuna &mdash;</option>';
@@ -1070,6 +1070,9 @@ class SOS_PG_Plugin {
             // dal form del sito principale (scenario: l'admin cambia il selettore ruolo
             // da "main" a "partner" e salva — il form visualizzato era quello del sito
             // principale e non include questi campi specifici del partner).
+            // Nota: se la chiave è presente nel POST ma con valore vuoto (cancellazione
+            // esplicita da parte dell'utente), il valore vuoto viene comunque scritto nel
+            // database, rispettando così l'intenzione esplicita dell'admin.
             if (isset($_POST['partner_webhook_secret'])) {
                 $settings['partner_webhook_secret'] = sanitize_text_field(wp_unslash($_POST['partner_webhook_secret']));
             }
