@@ -274,11 +274,19 @@ class SOS_PG_Plugin {
         if (!$user_id) {
             // Fallback su cookie se l’utente non risulta autenticato (es. sessione persa nel frontend LatePoint).
             $cookie_pid = sanitize_text_field((string) ($_COOKIE['sos_pg_partner_id'] ?? ''));
-            return $cookie_pid;
+            return preg_match('/^[a-zA-Z0-9_\-]{1,64}$/', $cookie_pid) ? $cookie_pid : '';
         }
 
         $partner_id = get_user_meta($user_id, 'partner_id', true);
-        return is_string($partner_id) ? trim($partner_id) : '';
+        if (is_string($partner_id) && trim($partner_id) !== '') {
+            return trim($partner_id);
+        }
+
+        // Fallback su cookie anche quando l'utente è autenticato ma il meta è assente
+        // (es. primo accesso dopo il fix del login, prima che il meta venga riscritto).
+        $cookie_pid = sanitize_text_field((string) ($_COOKIE['sos_pg_partner_id'] ?? ''));
+        // Accetta solo valori con i caratteri ammessi per un partner_id (alfanumerici e trattini).
+        return preg_match('/^[a-zA-Z0-9_\-]{1,64}$/', $cookie_pid) ? $cookie_pid : '';
     }
 
     private function current_endpoint_path() {
@@ -1541,11 +1549,21 @@ class SOS_PG_Plugin {
     }
 
     public function handle_booking_created($booking, $cart = null) {
+        static $sent_booking_ids = [];
+
+        $booking_id_early = (string) $this->safe_get($booking, 'id');
+        if ($booking_id_early !== '' && isset($sent_booking_ids[$booking_id_early])) {
+            // Deduplicazione: evita l'invio doppio del webhook quando entrambi gli hook
+            // LatePoint (latepoint_after_create_booking e latepoint_booking_created) scattano
+            // per lo stesso booking nella stessa request.
+            return;
+        }
+
         $partner_id = $this->get_current_partner_id();
 
         if ($partner_id === '') {
             $this->log_event('INFO', 'BOOKING_WEBHOOK_SKIP_NO_PARTNER', [
-                'context' => ['booking_id' => $this->safe_get($booking, 'id')],
+                'context' => ['booking_id' => $booking_id_early],
             ]);
             return;
         }
@@ -1629,6 +1647,9 @@ class SOS_PG_Plugin {
             $partner_payload['pay_on_partner'] = true;
         }
 
+        if ($booking_id_early !== '') {
+            $sent_booking_ids[$booking_id_early] = true;
+        }
         $this->send_partner_webhook($partner_id, $partner_payload);
     }
 
@@ -1670,9 +1691,21 @@ class SOS_PG_Plugin {
             return;
         }
 
+        $http_code = wp_remote_retrieve_response_code($resp);
+        if ($http_code < 200 || $http_code >= 300) {
+            $this->log_event('WARN', 'WEBHOOK_PARTNER_FAIL', [
+                'partner_id' => $partner_id,
+                'reason' => 'HTTP ' . $http_code,
+                'context' => [
+                    'booking_id'    => $payload['booking_id'] ?? null,
+                    'response_body' => substr((string) wp_remote_retrieve_body($resp), 0, 500),
+                ],
+            ]);
+            return;
+        }
         $this->log_event('INFO', 'WEBHOOK_PARTNER_SENT', [
             'partner_id' => $partner_id,
-            'context' => ['http_code' => wp_remote_retrieve_response_code($resp)],
+            'context' => ['http_code' => $http_code, 'booking_id' => $payload['booking_id'] ?? null],
         ]);
     }
 
@@ -1786,6 +1819,12 @@ class SOS_PG_Plugin {
     public function handle_partner_tester_webhook() {
         if (!isset($_GET['sos_pg_webhook'])) {
             return;
+        }
+
+        // Accetta solo richieste POST: una GET (es. browser) non deve sovrascrivere l'ultimo webhook registrato.
+        if (strtoupper(sanitize_text_field(wp_unslash($_SERVER['REQUEST_METHOD'] ?? 'GET'))) !== 'POST') {
+            status_header(405);
+            exit;
         }
 
         $settings = $this->get_settings();
