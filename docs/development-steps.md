@@ -36,3 +36,9 @@
 - [x] Parametri ingresso da F+H
 - [x] Callback booking verso F+H
 - [x] Callback esito pagamento da F+H
+
+## Fix — Preservazione campi partner durante cambio ruolo
+
+- [x] `isset()` guard su `partner_webhook_secret`, `partner_callback_url`, `partner_callback_secret` in `handle_save_settings()`: i campi vengono scritti nel database solo se presenti nel POST, evitando l'azzeramento involontario durante il cambio ruolo `main → partner`.
+- [x] Redirect post-salvataggio dinamico: punta a `sos-partner-gateway` (modalità partner) o `sos-partner-gateway-settings` (modalità principale), evitando la schermata "Non autorizzato" dopo il cambio ruolo.
+

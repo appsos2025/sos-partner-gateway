@@ -14,6 +14,53 @@ Plugin WordPress per:
 - PHP 7.4+ con estensione `openssl`
 - Plugin LatePoint (per booking, sconti e webhook; opzionale se si usa solo il gateway di login)
 
+## Ruolo del sito: main vs partner
+
+Il plugin supporta due modalità operative, selezionabili dall'admin in **Impostazioni → Ruolo sito**:
+
+| Modalità | Quando usarla |
+|---|---|
+| **Sito principale (gateway)** — `main` | Il sito riceve i login firmati, gestisce le prenotazioni LatePoint, invia webhook ai partner e accetta i callback di pagamento. |
+| **Sito partner** — `partner` | Il sito firma e invia le richieste di login al sito principale tramite shortcode o tester integrato. Non gestisce prenotazioni in proprio. |
+
+### Campi visibili in base al ruolo
+
+**Modalità `main` (sito principale)** — vengono mostrate tutte le impostazioni del gateway:
+- Slug endpoint login, pagina di cortesia, debug log
+- Rate limit breve e lungo (tentativi, finestre temporali, durata ban)
+- Chiave pubblica ECC (PEM) per la verifica firma
+- Slug e secret callback pagamento partner
+- Stato di successo pagamento
+- Shortcode self-use: Partner ID, URL endpoint login, chiave privata ECC
+
+**Modalità `partner` (sito partner)** — vengono mostrati solo i campi necessari lato partner:
+- Partner ID
+- URL endpoint login (sito principale)
+- Chiave privata ECC (PEM) per firmare le richieste
+- URL webhook in entrata (generato automaticamente: `/?sos_pg_webhook=1`) e secret HMAC
+- URL callback pagamento (sito principale) e secret
+
+I campi esclusivi del sito principale (rate limit, chiave pubblica, slug callback, ecc.) sono nascosti in modalità partner perché non hanno rilevanza su un sito che non gestisce prenotazioni direttamente.
+
+### Cambio ruolo e salvataggio
+
+Dopo aver modificato il selettore **Ruolo sito** è necessario cliccare **Salva impostazioni** per applicare la nuova modalità. Il menu di amministrazione cambia di conseguenza:
+
+- `main`: menu con Log, Impostazioni, Pagine Partner, Test pagamento
+- `partner`: menu con Impostazioni e Tester
+
+Il redirect dopo il salvataggio punta alla pagina corretta in base al ruolo attivo:
+- Modalità `partner` → `admin.php?page=sos-partner-gateway&msg=saved`
+- Modalità `main` → `admin.php?page=sos-partner-gateway-settings&msg=saved`
+
+### Preservazione dei campi partner durante il cambio ruolo
+
+Quando si passa da `main` a `partner` (o viceversa) il form visualizzato appartiene al vecchio ruolo e non contiene i campi esclusivi del nuovo ruolo. Per evitare di azzerare involontariamente i valori già configurati, il plugin usa controlli `isset()` sui campi partner-only prima di aggiornarli:
+
+- I tre campi `partner_webhook_secret`, `partner_callback_url`, `partner_callback_secret` vengono scritti nel database **solo se presenti nel POST** ricevuto.
+- Se il POST proviene dal form del sito principale (cambio ruolo `main → partner`), questi campi sono assenti → i valori già salvati vengono conservati.
+- Se il POST proviene dal form del sito partner, i campi sono presenti → vengono aggiornati normalmente, inclusa la cancellazione esplicita (campo presente ma vuoto).
+
 ## Installazione
 1. Carica la cartella `sos-partner-gateway` in `wp-content/plugins/`.
 2. Attiva il plugin da **Plugin → Plugin installati**.
