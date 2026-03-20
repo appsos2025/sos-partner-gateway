@@ -634,19 +634,25 @@ class SOS_PG_Plugin {
             $user_id = wp_create_user($email, wp_generate_password(20, true, true), $email);
 
             if (is_wp_error($user_id)) {
-                $this->log_event('ERROR', 'PARTNER_LOGIN_CREATE_USER_ERROR', [
-                    'partner_id' => $partner_id,
-                    'email' => $email,
-                    'ip' => $ip,
-                    'reason' => $user_id->get_error_message(),
-                    'user_agent' => $ua,
-                ]);
-                status_header(500);
-                exit('Errore creazione utente');
-            }
+                // The username (email) may already exist even if the email lookup failed.
+                // Try to recover the existing user by login before treating this as a fatal error.
+                $user = get_user_by('login', $email);
 
-            $user = get_user_by('id', $user_id);
-            $is_new_user = true;
+                if (!$user) {
+                    $this->log_event('ERROR', 'PARTNER_LOGIN_CREATE_USER_ERROR', [
+                        'partner_id' => $partner_id,
+                        'email' => $email,
+                        'ip' => $ip,
+                        'reason' => $user_id->get_error_message(),
+                        'user_agent' => $ua,
+                    ]);
+                    status_header(500);
+                    exit('Errore creazione utente');
+                }
+            } else {
+                $user = get_user_by('id', $user_id);
+                $is_new_user = true;
+            }
         }
 
         update_user_meta($user->ID, 'partner_id', $partner_id);
