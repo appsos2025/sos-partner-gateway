@@ -216,6 +216,27 @@ class SOS_PG_Plugin {
         return is_array($map) ? $map : [];
     }
 
+    /**
+     * Individua il partner_id dal location_id LatePoint configurato nel webhook.
+     * Usato come fallback quando get_current_partner_id() non restituisce nulla
+     * (es. prenotazione creata in contesto AJAX senza sessione WP).
+     */
+    private function get_partner_id_by_location($location_id) {
+        if ((string) $location_id === '') {
+            return '';
+        }
+        foreach ($this->get_partner_webhooks() as $pid => $cfg) {
+            if (!is_array($cfg)) {
+                continue;
+            }
+            $cfg_loc = (string) ($cfg['location_id'] ?? '');
+            if ($cfg_loc !== '' && $cfg_loc === (string) $location_id) {
+                return (string) $pid;
+            }
+        }
+        return '';
+    }
+
     private function get_partner_discount_config($partner_id = '') {
         if ($partner_id === '') {
             $partner_id = $this->get_current_partner_id();
@@ -274,7 +295,7 @@ class SOS_PG_Plugin {
         if (!$user_id) {
             // Fallback su cookie se l’utente non risulta autenticato (es. sessione persa nel frontend LatePoint).
             $cookie_pid = sanitize_text_field((string) ($_COOKIE['sos_pg_partner_id'] ?? ''));
-            return preg_match('/^[a-zA-Z0-9_\-]{1,64}$/', $cookie_pid) ? $cookie_pid : '';
+            return preg_match('/^[a-zA-Z0-9_-]{1,64}$/', $cookie_pid) ? $cookie_pid : '';
         }
 
         $partner_id = get_user_meta($user_id, 'partner_id', true);
@@ -286,7 +307,7 @@ class SOS_PG_Plugin {
         // (es. primo accesso dopo il fix del login, prima che il meta venga riscritto).
         $cookie_pid = sanitize_text_field((string) ($_COOKIE['sos_pg_partner_id'] ?? ''));
         // Accetta solo valori con i caratteri ammessi per un partner_id (alfanumerici e trattini).
-        return preg_match('/^[a-zA-Z0-9_\-]{1,64}$/', $cookie_pid) ? $cookie_pid : '';
+        return preg_match('/^[a-zA-Z0-9_-]{1,64}$/', $cookie_pid) ? $cookie_pid : '';
     }
 
     private function current_endpoint_path() {
@@ -1004,20 +1025,23 @@ class SOS_PG_Plugin {
 
         echo '<h2 style="margin-top:24px;">Webhook partner (booking_created)</h2>';
         echo '<p>Configura URL e secret per ogni partner. Il payload inviato include booking_id, status, total, orario, customer_email.</p>';
+        echo '<p><em>Location ID LatePoint</em>: inserisci il numero (ID) della posizione LatePoint associata al partner. Questo consente di inviare il webhook anche quando il partner non è rilevabile dalla sessione WordPress.</p>';
 
         echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin-top:12px;">';
         wp_nonce_field('sos_pg_save_webhooks');
         echo '<input type="hidden" name="action" value="sos_pg_save_webhooks">';
         $webhooks = $this->get_partner_webhooks();
-        $webhooks[''] = ['url' => '', 'secret' => ''];
-        echo '<table class="widefat striped"><thead><tr><th>Partner ID</th><th>Webhook URL</th><th>Secret (HMAC)</th></tr></thead><tbody>';
+        $webhooks[''] = ['url' => '', 'secret' => '', 'location_id' => ''];
+        echo '<table class="widefat striped"><thead><tr><th>Partner ID</th><th>Webhook URL</th><th>Secret (HMAC)</th><th>Location ID LatePoint</th></tr></thead><tbody>';
         foreach ($webhooks as $pid => $cfg) {
             $url = is_array($cfg) ? ($cfg['url'] ?? '') : '';
             $secret = is_array($cfg) ? ($cfg['secret'] ?? '') : '';
+            $loc_id = is_array($cfg) ? ($cfg['location_id'] ?? '') : '';
             echo '<tr>';
             echo '<td><input type="text" name="webhooks[partner_id][]" value="' . esc_attr($pid) . '" class="regular-text" placeholder="es. hf"></td>';
             echo '<td><input type="url" name="webhooks[url][]" value="' . esc_attr($url) . '" class="regular-text" placeholder="https://partner.example.com/webhook"></td>';
             echo '<td><input type="text" name="webhooks[secret][]" value="' . esc_attr($secret) . '" class="regular-text" placeholder="secret condiviso"></td>';
+            echo '<td><input type="number" min="1" name="webhooks[location_id][]" value="' . esc_attr($loc_id) . '" class="small-text" placeholder="es. 3"></td>';
             echo '</tr>';
         }
         echo '</tbody></table>';
@@ -1222,6 +1246,7 @@ class SOS_PG_Plugin {
         $partner_ids = $_POST['webhooks']['partner_id'] ?? [];
         $urls = $_POST['webhooks']['url'] ?? [];
         $secrets = $_POST['webhooks']['secret'] ?? [];
+        $location_ids = $_POST['webhooks']['location_id'] ?? [];
 
         $map = [];
         if (is_array($partner_ids) && is_array($urls) && is_array($secrets)) {
@@ -1229,6 +1254,11 @@ class SOS_PG_Plugin {
                 $pid = sanitize_text_field(wp_unslash($pid_raw));
                 $url = isset($urls[$idx]) ? esc_url_raw(trim((string) wp_unslash($urls[$idx]))) : '';
                 $secret = isset($secrets[$idx]) ? sanitize_text_field(wp_unslash($secrets[$idx])) : '';
+                $loc_id = isset($location_ids[$idx]) ? trim(sanitize_text_field(wp_unslash((string) $location_ids[$idx]))) : '';
+                // Accetta solo location_id numerici positivi (IDs LatePoint).
+                if ($loc_id !== '' && (!ctype_digit($loc_id) || (int) $loc_id < 1)) {
+                    $loc_id = '';
+                }
 
                 if ($pid === '' || $url === '') {
                     continue;
@@ -1237,6 +1267,7 @@ class SOS_PG_Plugin {
                 $map[$pid] = [
                     'url' => $url,
                     'secret' => $secret,
+                    'location_id' => $loc_id,
                 ];
             }
         }
@@ -1559,11 +1590,19 @@ class SOS_PG_Plugin {
             return;
         }
 
+        // Recupera location_id subito: serve sia per il payload sia come fallback partner.
+        $location_id = $this->safe_get($booking, 'location_id');
+
         $partner_id = $this->get_current_partner_id();
 
         if ($partner_id === '') {
+            // Fallback: individua il partner dal location_id LatePoint configurato nel webhook.
+            $partner_id = $this->get_partner_id_by_location($location_id);
+        }
+
+        if ($partner_id === '') {
             $this->log_event('INFO', 'BOOKING_WEBHOOK_SKIP_NO_PARTNER', [
-                'context' => ['booking_id' => $booking_id_early],
+                'context' => ['booking_id' => $booking_id_early, 'location_id' => $location_id],
             ]);
             return;
         }
@@ -1572,7 +1611,6 @@ class SOS_PG_Plugin {
         $status = $this->safe_get($booking, 'status');
         $service_id = $this->safe_get($booking, 'service_id');
         $agent_id = $this->safe_get($booking, 'agent_id');
-        $location_id = $this->safe_get($booking, 'location_id');
         $start_date = $this->safe_get($booking, 'start_date');
         $start_time = $this->safe_get($booking, 'start_time');
         $end_time = $this->safe_get($booking, 'end_time');
