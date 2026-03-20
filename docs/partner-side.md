@@ -100,6 +100,41 @@ Ogni portale deve configurare:
 - Secret HMAC per la verifica firma
 - URL e secret per inviare il callback di pagamento
 
+## Plugin installato direttamente sul sito partner (modalità WordPress)
+
+Se il portale partner è basato su WordPress, il plugin può essere installato direttamente su di esso e configurato in **modalità partner** (`Impostazioni → Ruolo sito → Sito partner`). Non è necessario sviluppare un ricevitore webhook personalizzato: il plugin gestisce l'intera logica lato partner.
+
+### Campi di configurazione visibili in modalità partner
+
+| Campo | Descrizione |
+|---|---|
+| **Partner ID** | ID che identifica questo sito sul sito principale (es. `hf`). |
+| **URL endpoint login (sito principale)** | URL completo del `/partner-login/` del sito principale. |
+| **Chiave privata ECC (PEM)** | Chiave privata per firmare le richieste di login. Deve corrispondere alla chiave pubblica configurata sul sito principale. |
+| **URL webhook in entrata** | Generato automaticamente: `https://<tuo-dominio>/?sos_pg_webhook=1`. Copialo nella configurazione webhook del sito principale. |
+| **Secret webhook in entrata (HMAC)** | Lo stesso secret configurato sul sito principale per questo partner. Usato per verificare la firma delle notifiche in arrivo. |
+| **URL callback pagamento (sito principale)** | URL dell'endpoint `/partner-payment-callback/` del sito principale. |
+| **Secret callback pagamento** | Secret per firmare le richieste di conferma pagamento inviate al sito principale. |
+
+I campi esclusivi del sito principale (rate limit, chiave pubblica, slug callback, pagina di cortesia, ecc.) sono nascosti in modalità partner perché non rilevanti.
+
+### Cambio ruolo e preservazione dei valori
+
+Quando si modifica il selettore **Ruolo sito** e si salva (es. passando da `main` a `partner`), il form visibile appartiene ancora al vecchio ruolo e non include i campi partner-only. Per evitare di azzerare i valori già configurati, il plugin applica i seguenti controlli:
+
+- `partner_webhook_secret`, `partner_callback_url`, `partner_callback_secret` vengono aggiornati **solo se presenti nel POST**.
+- Se il POST proviene dal form del sito principale (passaggio `main → partner`), questi campi sono assenti → i valori già salvati vengono **conservati**.
+- Se il POST proviene dal form del sito partner, i campi sono presenti → vengono aggiornati normalmente.
+- Svuotare esplicitamente un campo (valore vuoto, ma chiave presente) **cancella** il valore: l'intento esplicito dell'utente viene rispettato.
+
+### Redirect dopo il salvataggio
+
+Il redirect post-salvataggio punta alla pagina admin corretta in base al ruolo attivo:
+- Modalità `partner` → `admin.php?page=sos-partner-gateway&msg=saved`
+- Modalità `main` → `admin.php?page=sos-partner-gateway-settings&msg=saved`
+
+Questo evita la schermata "Non autorizzato" che si verificava in precedenza quando si veniva reindirizzati al slug della pagina del ruolo opposto.
+
 ## Shortcode [sos_partner_prenota] — pulsante "Prenota" self-service
 
 Per lo scenario in cui il **proprietario del sito** vuole aggiungere un pulsante
