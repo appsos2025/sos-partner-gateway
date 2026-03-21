@@ -216,6 +216,27 @@ class SOS_PG_Plugin {
         return is_array($map) ? $map : [];
     }
 
+    /**
+     * Individua il partner_id dal location_id LatePoint configurato nel webhook.
+     * Usato come fallback quando get_current_partner_id() non restituisce nulla
+     * (es. prenotazione creata in contesto AJAX senza sessione WP).
+     */
+    private function get_partner_id_by_location($location_id) {
+        if ((string) $location_id === '') {
+            return '';
+        }
+        foreach ($this->get_partner_webhooks() as $pid => $cfg) {
+            if (!is_array($cfg)) {
+                continue;
+            }
+            $cfg_loc = (string) ($cfg['location_id'] ?? '');
+            if ($cfg_loc !== '' && $cfg_loc === (string) $location_id) {
+                return (string) $pid;
+            }
+        }
+        return '';
+    }
+
     private function get_partner_discount_config($partner_id = '') {
         if ($partner_id === '') {
             $partner_id = $this->get_current_partner_id();
@@ -274,11 +295,19 @@ class SOS_PG_Plugin {
         if (!$user_id) {
             // Fallback su cookie se l’utente non risulta autenticato (es. sessione persa nel frontend LatePoint).
             $cookie_pid = sanitize_text_field((string) ($_COOKIE['sos_pg_partner_id'] ?? ''));
-            return $cookie_pid;
+            return preg_match('/^[a-zA-Z0-9_-]{1,64}$/', $cookie_pid) ? $cookie_pid : '';
         }
 
         $partner_id = get_user_meta($user_id, 'partner_id', true);
-        return is_string($partner_id) ? trim($partner_id) : '';
+        if (is_string($partner_id) && trim($partner_id) !== '') {
+            return trim($partner_id);
+        }
+
+        // Fallback su cookie anche quando l'utente è autenticato ma il meta è assente
+        // (es. primo accesso dopo il fix del login, prima che il meta venga riscritto).
+        $cookie_pid = sanitize_text_field((string) ($_COOKIE['sos_pg_partner_id'] ?? ''));
+        // Accetta solo valori con i caratteri ammessi per un partner_id (alfanumerici e trattini).
+        return preg_match('/^[a-zA-Z0-9_-]{1,64}$/', $cookie_pid) ? $cookie_pid : '';
     }
 
     private function current_endpoint_path() {
@@ -634,19 +663,25 @@ class SOS_PG_Plugin {
             $user_id = wp_create_user($email, wp_generate_password(20, true, true), $email);
 
             if (is_wp_error($user_id)) {
-                $this->log_event('ERROR', 'PARTNER_LOGIN_CREATE_USER_ERROR', [
-                    'partner_id' => $partner_id,
-                    'email' => $email,
-                    'ip' => $ip,
-                    'reason' => $user_id->get_error_message(),
-                    'user_agent' => $ua,
-                ]);
-                status_header(500);
-                exit('Errore creazione utente');
-            }
+                // The username (email) may already exist even if the email lookup failed.
+                // Try to recover the existing user by login before treating this as a fatal error.
+                $user = get_user_by('login', $email);
 
-            $user = get_user_by('id', $user_id);
-            $is_new_user = true;
+                if (!$user) {
+                    $this->log_event('ERROR', 'PARTNER_LOGIN_CREATE_USER_ERROR', [
+                        'partner_id' => $partner_id,
+                        'email' => $email,
+                        'ip' => $ip,
+                        'reason' => $user_id->get_error_message(),
+                        'user_agent' => $ua,
+                    ]);
+                    status_header(500);
+                    exit('Errore creazione utente');
+                }
+            } else {
+                $user = get_user_by('id', $user_id);
+                $is_new_user = true;
+            }
         }
 
         update_user_meta($user->ID, 'partner_id', $partner_id);
@@ -990,20 +1025,23 @@ class SOS_PG_Plugin {
 
         echo '<h2 style="margin-top:24px;">Webhook partner (booking_created)</h2>';
         echo '<p>Configura URL e secret per ogni partner. Il payload inviato include booking_id, status, total, orario, customer_email.</p>';
+        echo '<p><em>Location ID LatePoint</em>: inserisci il numero (ID) della posizione LatePoint associata al partner. Questo consente di inviare il webhook anche quando il partner non è rilevabile dalla sessione WordPress.</p>';
 
         echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin-top:12px;">';
         wp_nonce_field('sos_pg_save_webhooks');
         echo '<input type="hidden" name="action" value="sos_pg_save_webhooks">';
         $webhooks = $this->get_partner_webhooks();
-        $webhooks[''] = ['url' => '', 'secret' => ''];
-        echo '<table class="widefat striped"><thead><tr><th>Partner ID</th><th>Webhook URL</th><th>Secret (HMAC)</th></tr></thead><tbody>';
+        $webhooks[''] = ['url' => '', 'secret' => '', 'location_id' => ''];
+        echo '<table class="widefat striped"><thead><tr><th>Partner ID</th><th>Webhook URL</th><th>Secret (HMAC)</th><th>Location ID LatePoint</th></tr></thead><tbody>';
         foreach ($webhooks as $pid => $cfg) {
             $url = is_array($cfg) ? ($cfg['url'] ?? '') : '';
             $secret = is_array($cfg) ? ($cfg['secret'] ?? '') : '';
+            $loc_id = is_array($cfg) ? ($cfg['location_id'] ?? '') : '';
             echo '<tr>';
             echo '<td><input type="text" name="webhooks[partner_id][]" value="' . esc_attr($pid) . '" class="regular-text" placeholder="es. hf"></td>';
             echo '<td><input type="url" name="webhooks[url][]" value="' . esc_attr($url) . '" class="regular-text" placeholder="https://partner.example.com/webhook"></td>';
             echo '<td><input type="text" name="webhooks[secret][]" value="' . esc_attr($secret) . '" class="regular-text" placeholder="secret condiviso"></td>';
+            echo '<td><input type="number" min="1" name="webhooks[location_id][]" value="' . esc_attr($loc_id) . '" class="small-text" placeholder="es. 3"></td>';
             echo '</tr>';
         }
         echo '</tbody></table>';
@@ -1208,6 +1246,7 @@ class SOS_PG_Plugin {
         $partner_ids = $_POST['webhooks']['partner_id'] ?? [];
         $urls = $_POST['webhooks']['url'] ?? [];
         $secrets = $_POST['webhooks']['secret'] ?? [];
+        $location_ids = $_POST['webhooks']['location_id'] ?? [];
 
         $map = [];
         if (is_array($partner_ids) && is_array($urls) && is_array($secrets)) {
@@ -1215,6 +1254,11 @@ class SOS_PG_Plugin {
                 $pid = sanitize_text_field(wp_unslash($pid_raw));
                 $url = isset($urls[$idx]) ? esc_url_raw(trim((string) wp_unslash($urls[$idx]))) : '';
                 $secret = isset($secrets[$idx]) ? sanitize_text_field(wp_unslash($secrets[$idx])) : '';
+                $loc_id = isset($location_ids[$idx]) ? trim(sanitize_text_field(wp_unslash((string) $location_ids[$idx]))) : '';
+                // Accetta solo location_id numerici positivi (IDs LatePoint).
+                if ($loc_id !== '' && (!ctype_digit($loc_id) || (int) $loc_id < 1)) {
+                    $loc_id = '';
+                }
 
                 if ($pid === '' || $url === '') {
                     continue;
@@ -1223,6 +1267,7 @@ class SOS_PG_Plugin {
                 $map[$pid] = [
                     'url' => $url,
                     'secret' => $secret,
+                    'location_id' => $loc_id,
                 ];
             }
         }
@@ -1535,11 +1580,29 @@ class SOS_PG_Plugin {
     }
 
     public function handle_booking_created($booking, $cart = null) {
+        static $sent_booking_ids = [];
+
+        $booking_id_early = (string) $this->safe_get($booking, 'id');
+        if ($booking_id_early !== '' && isset($sent_booking_ids[$booking_id_early])) {
+            // Deduplicazione: evita l'invio doppio del webhook quando entrambi gli hook
+            // LatePoint (latepoint_after_create_booking e latepoint_booking_created) scattano
+            // per lo stesso booking nella stessa request.
+            return;
+        }
+
+        // Recupera location_id subito: serve sia per il payload sia come fallback partner.
+        $location_id = $this->safe_get($booking, 'location_id');
+
         $partner_id = $this->get_current_partner_id();
 
         if ($partner_id === '') {
+            // Fallback: individua il partner dal location_id LatePoint configurato nel webhook.
+            $partner_id = $this->get_partner_id_by_location($location_id);
+        }
+
+        if ($partner_id === '') {
             $this->log_event('INFO', 'BOOKING_WEBHOOK_SKIP_NO_PARTNER', [
-                'context' => ['booking_id' => $this->safe_get($booking, 'id')],
+                'context' => ['booking_id' => $booking_id_early, 'location_id' => $location_id],
             ]);
             return;
         }
@@ -1548,7 +1611,6 @@ class SOS_PG_Plugin {
         $status = $this->safe_get($booking, 'status');
         $service_id = $this->safe_get($booking, 'service_id');
         $agent_id = $this->safe_get($booking, 'agent_id');
-        $location_id = $this->safe_get($booking, 'location_id');
         $start_date = $this->safe_get($booking, 'start_date');
         $start_time = $this->safe_get($booking, 'start_time');
         $end_time = $this->safe_get($booking, 'end_time');
@@ -1623,6 +1685,9 @@ class SOS_PG_Plugin {
             $partner_payload['pay_on_partner'] = true;
         }
 
+        if ($booking_id_early !== '') {
+            $sent_booking_ids[$booking_id_early] = true;
+        }
         $this->send_partner_webhook($partner_id, $partner_payload);
     }
 
@@ -1664,9 +1729,21 @@ class SOS_PG_Plugin {
             return;
         }
 
+        $http_code = wp_remote_retrieve_response_code($resp);
+        if ($http_code < 200 || $http_code >= 300) {
+            $this->log_event('WARN', 'WEBHOOK_PARTNER_FAIL', [
+                'partner_id' => $partner_id,
+                'reason' => 'HTTP ' . $http_code,
+                'context' => [
+                    'booking_id'    => $payload['booking_id'] ?? null,
+                    'response_body' => substr((string) wp_remote_retrieve_body($resp), 0, 500),
+                ],
+            ]);
+            return;
+        }
         $this->log_event('INFO', 'WEBHOOK_PARTNER_SENT', [
             'partner_id' => $partner_id,
-            'context' => ['http_code' => wp_remote_retrieve_response_code($resp)],
+            'context' => ['http_code' => $http_code, 'booking_id' => $payload['booking_id'] ?? null],
         ]);
     }
 
@@ -1780,6 +1857,12 @@ class SOS_PG_Plugin {
     public function handle_partner_tester_webhook() {
         if (!isset($_GET['sos_pg_webhook'])) {
             return;
+        }
+
+        // Accetta solo richieste POST: una GET (es. browser) non deve sovrascrivere l'ultimo webhook registrato.
+        if (strtoupper(sanitize_text_field(wp_unslash($_SERVER['REQUEST_METHOD'] ?? 'GET'))) !== 'POST') {
+            status_header(405);
+            exit;
         }
 
         $settings = $this->get_settings();
