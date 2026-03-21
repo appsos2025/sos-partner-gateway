@@ -1339,6 +1339,18 @@ class SOS_PG_Plugin {
         }
 
         $code = (int) wp_remote_retrieve_response_code($resp);
+
+        if ($code < 200 || $code >= 300) {
+            $body_preview = substr((string) wp_remote_retrieve_body($resp), 0, 300);
+            $this->log_event('WARN', 'PAYMENT_CALLBACK_TEST_FAIL', [
+                'partner_id' => $partner_id,
+                'reason' => 'HTTP ' . $code . ($body_preview !== '' ? ' — ' . $body_preview : ''),
+                'context' => ['booking_id' => $booking_id, 'http_code' => $code],
+            ]);
+            wp_safe_redirect(add_query_arg(['page' => 'sos-partner-gateway-payment-test', 'msg' => 'fail', 'detail' => rawurlencode('HTTP ' . $code . ($body_preview !== '' ? ' — ' . $body_preview : ''))], admin_url('admin.php')));
+            exit;
+        }
+
         $this->log_event('INFO', 'PAYMENT_CALLBACK_TEST_OK', [
             'partner_id' => $partner_id,
             'context' => [
@@ -1601,8 +1613,20 @@ class SOS_PG_Plugin {
         }
 
         if ($partner_id === '') {
+            // Costruisce un hint diagnostico: se location_id è presente ma non configurato in nessun
+            // webhook, suggerisce all'amministratore di impostarlo nella pagina "Pagine Partner".
+            $hint = '';
+            if ((string) $location_id !== '') {
+                $configured_locations = array_filter(array_column($this->get_partner_webhooks(), 'location_id'));
+                if (empty($configured_locations)) {
+                    $hint = 'Nessun location_id configurato nei webhook partner. Imposta location_id=' . $location_id . ' per il partner corretto in "Pagine Partner > Webhook".';
+                } else {
+                    $hint = 'location_id=' . $location_id . ' non corrisponde a nessun partner configurato. Location_id configurati: ' . implode(', ', $configured_locations) . '.';
+                }
+            }
             $this->log_event('INFO', 'BOOKING_WEBHOOK_SKIP_NO_PARTNER', [
                 'context' => ['booking_id' => $booking_id_early, 'location_id' => $location_id],
+                'reason' => $hint ?: null,
             ]);
             return;
         }
@@ -1851,11 +1875,12 @@ class SOS_PG_Plugin {
     // -----------------------------------------------------------------------
 
     /**
-     * Hook init: ascolta ?sos_pg_webhook=1 e registra il webhook ricevuto.
+     * Hook init: ascolta ?sos_pg_webhook=1 (e il parametro legacy ?sos_pg_tester_webhook=1)
+     * e registra il webhook ricevuto.
      * Usato in modalita partner per ricevere le notifiche booking_created dal sito principale.
      */
     public function handle_partner_tester_webhook() {
-        if (!isset($_GET['sos_pg_webhook'])) {
+        if (!isset($_GET['sos_pg_webhook']) && !isset($_GET['sos_pg_tester_webhook'])) {
             return;
         }
 
@@ -1952,6 +1977,18 @@ class SOS_PG_Plugin {
         // --- Webhook listener ---
         $listener_url = home_url('/?sos_pg_webhook=1');
         $last = get_option($this->tester_webhook_key, []);
+        // Compatibilità retroattiva: se non ci sono dati nel nuovo listener, leggi dal vecchio
+        // plugin partner-login-tester (sos_pg_tester_last_webhook) nel caso il sito principale
+        // stia ancora usando il vecchio URL ?sos_pg_tester_webhook=1.
+        if (empty($last)) {
+            $legacy = get_option('sos_pg_tester_last_webhook', []);
+            if (!empty($legacy)) {
+                // Migra i dati nel nuovo option key in modo che le operazioni successive
+                // (es. auto_confirmed) agiscano sull'opzione corretta.
+                $last = $legacy;
+                update_option($this->tester_webhook_key, $last);
+            }
+        }
         $last_booking_id = 0;
         if (!empty($last['body']['booking_id'])) {
             $last_booking_id = (int) $last['body']['booking_id'];
@@ -1959,6 +1996,7 @@ class SOS_PG_Plugin {
 
         echo '<h2>Listener webhook (booking_created)</h2>';
         echo '<p>Configura nel sito principale questo URL webhook per il tuo partner: <code>' . esc_html($listener_url) . '</code></p>';
+        echo '<p><em>Nota: questo listener accetta anche le richieste al vecchio URL <code>' . esc_html(home_url('/?sos_pg_tester_webhook=1')) . '</code> per compatibilit&agrave; con installazioni precedenti.</em></p>';
         echo '<p><strong>Secret webhook:</strong> ' . ($settings['partner_webhook_secret'] ? '<code>configurato</code>' : '<span style="color:#d63638;">mancante &mdash; impostalo nelle Impostazioni</span>') . '</p>';
 
         echo '<h3>Ultimo webhook ricevuto:</h3>';
@@ -2163,9 +2201,15 @@ class SOS_PG_Plugin {
             }
         }
 
-        echo '<div class="notice notice-success"><p>Callback inviata. HTTP ' . esc_html($code) . '.</p></div>';
+        if ($code >= 200 && $code < 300) {
+            echo '<div class="notice notice-success"><p>Callback inviata. HTTP ' . esc_html($code) . '.</p></div>';
+        } else {
+            $body_preview = substr((string) wp_remote_retrieve_body($resp), 0, 300);
+            echo '<div class="notice notice-error"><p>Callback fallita. HTTP ' . esc_html($code) . ($body_preview !== '' ? ' &mdash; ' . esc_html($body_preview) : '') . '.</p></div>';
+            echo '<p>Verifica che <strong>Secret callback pagamento</strong> nel sito partner corrisponda al <strong>Secret callback</strong> del sito principale.</p>';
+        }
         echo '<p><a href="' . $back_url . '" class="button">Torna</a></p>';
-        echo '<script>setTimeout(function(){window.location.replace("' . $back_url_js . '");},2000);</script>';
+        echo '<script>setTimeout(function(){window.location.replace("' . $back_url_js . '");},3000);</script>';
     }
 
 
