@@ -377,8 +377,20 @@ class SOS_PG_Plugin {
         return 'sos_pg_fail_long_' . md5($ip);
     }
 
-    private function public_key_resource() {
-        $pem = trim((string) ($this->get_settings()['public_key_pem'] ?? ''));
+    private function public_key_resource($partner_id = '') {
+        $partner_pem = '';
+
+        if ($partner_id !== '') {
+            $cfg = $this->partner_registry ? $this->partner_registry->get_partner_config($partner_id) : null;
+            if ($cfg && !empty($cfg['public_key_pem'])) {
+                $partner_pem = trim((string) $cfg['public_key_pem']);
+            }
+        }
+
+        $pem = $partner_pem !== ''
+            ? $partner_pem
+            : trim((string) ($this->get_settings()['public_key_pem'] ?? ''));
+
         if ($pem === '') {
             return false;
         }
@@ -655,7 +667,7 @@ class SOS_PG_Plugin {
             exit('Firma non valida');
         }
 
-        $public_key = $this->public_key_resource();
+        $public_key = $this->public_key_resource($partner_id);
         if (!$public_key) {
             $this->log_event('ERROR', 'PARTNER_LOGIN_KEY_ERROR', [
                 'partner_id' => $partner_id,
@@ -1672,6 +1684,13 @@ class SOS_PG_Plugin {
             $partner_id = $default_partner_id;
         }
 
+        if ($partner_id !== '') {
+            $partner_cfg = $this->partner_registry ? $this->partner_registry->get_partner_config($partner_id) : null;
+            if ($partner_cfg && !empty($partner_cfg['private_key_pem'])) {
+                $pem = trim((string) $partner_cfg['private_key_pem']);
+            }
+        }
+
         // Fallback: se l'utente è già loggato usa la sua email.
         if ($email === '' && is_user_logged_in()) {
             $email = wp_get_current_user()->user_email;
@@ -2301,6 +2320,13 @@ class SOS_PG_Plugin {
         $endpoint   = (string) ($settings['self_login_endpoint_url'] ?? '');
         $partner_id = (string) ($settings['self_login_partner_id'] ?? '');
         $pem        = (string) ($settings['self_login_private_key_pem'] ?? '');
+
+        if ($partner_id !== '') {
+            $partner_cfg = $this->partner_registry ? $this->partner_registry->get_partner_config($partner_id) : null;
+            if ($partner_cfg && !empty($partner_cfg['private_key_pem'])) {
+                $pem = (string) $partner_cfg['private_key_pem'];
+            }
+        }
 
         // Usa l'email dell'utente admin loggato come payload di test.
         $email = wp_get_current_user()->user_email;
