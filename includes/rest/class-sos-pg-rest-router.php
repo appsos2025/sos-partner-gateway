@@ -49,6 +49,19 @@ class SOS_PG_REST_Router {
                 ],
             ],
         ]);
+
+        register_rest_route('sos-pg/v1', '/embedded-booking/debug/(?P<partner_id>[A-Za-z0-9_-]{1,64})', [
+            'methods' => WP_REST_Server::READABLE,
+            'permission_callback' => function() {
+                return current_user_can('manage_options');
+            },
+            'callback' => [$this, 'handle_embedded_booking_debug'],
+            'args' => [
+                'partner_id' => [
+                    'sanitize_callback' => 'sanitize_text_field',
+                ],
+            ],
+        ]);
     }
 
     public function handle_health(WP_REST_Request $request) {
@@ -164,6 +177,34 @@ class SOS_PG_REST_Router {
             'email' => (string) $verified['email'],
             'partner_id' => (string) $verified['partner_id'],
             'expires_at' => (int) $verified['expires_at'],
+        ]);
+    }
+
+    public function handle_embedded_booking_debug(WP_REST_Request $request) {
+        $partner_id = sanitize_text_field((string) $request->get_param('partner_id'));
+        if ($partner_id === '') {
+            return new WP_Error('sos_pg_invalid_partner', 'Partner non valido', ['status' => 404]);
+        }
+
+        $registry = $this->plugin->get_partner_registry();
+        $cfg = $registry ? $registry->get_embedded_booking_partner($partner_id) : null;
+
+        if (!$cfg || ($cfg['enabled'] ?? false) === false) {
+            return new WP_Error('sos_pg_partner_not_found', 'Partner non trovato o non abilitato', ['status' => 404]);
+        }
+
+        if (($cfg['type'] ?? '') !== 'embedded_booking') {
+            return new WP_Error('sos_pg_partner_not_embedded', 'Partner non configurato per embedded booking', ['status' => 400]);
+        }
+
+        $embedded = $this->plugin->get_embedded_booking_service();
+        $normalized = $embedded ? $embedded->normalize_token_payload($partner_id, $request) : [];
+
+        return new WP_REST_Response([
+            'ok' => true,
+            'partner_id' => $partner_id,
+            'token_strategy' => $embedded ? $embedded->get_validation_token_strategy($partner_id) : '',
+            'normalized_payload' => $normalized,
         ]);
     }
 }

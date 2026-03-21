@@ -140,6 +140,7 @@ class SOS_PG_Partner_Registry {
 
         return [
             'partner_id' => $cfg['partner_id'],
+            'type' => 'embedded_booking',
             'enabled' => !empty($cfg['enabled']),
             'validation_token_strategy' => $cfg['validation_token_strategy'] ?? '',
             'no_upfront_cost' => !empty($cfg['no_upfront_cost']),
