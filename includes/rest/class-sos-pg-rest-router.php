@@ -150,8 +150,10 @@ class SOS_PG_REST_Router {
             return new WP_Error('sos_pg_handoff_invalid', 'Token non valido o scaduto', ['status' => 401]);
         }
 
+        // NEW: unified partner config usage
         $registry = $this->plugin->get_partner_registry();
-        $config = $registry ? $registry->get_external_api_partner($verified['partner_id']) : null;
+        $config = $registry ? $registry->get_partner_config($verified['partner_id']) : null;
+
         if (!$config || ($config['type'] ?? '') !== 'external_api' || empty($config['enabled'])) {
             return new WP_Error('sos_pg_handoff_invalid', 'Token non valido o scaduto', ['status' => 401]);
         }

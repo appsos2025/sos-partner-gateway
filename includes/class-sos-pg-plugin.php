@@ -67,6 +67,7 @@ class SOS_PG_Plugin {
             add_action('admin_post_sos_pg_save_discounts', [$this, 'handle_save_discounts']);
             add_action('admin_post_sos_pg_save_webhooks', [$this, 'handle_save_webhooks']);
             add_action('admin_post_sos_pg_send_payment_test', [$this, 'handle_send_payment_test']);
+            add_action('admin_post_sos_pg_save_partner_configs', [$this, 'handle_save_partner_configs']);
 
             // LatePoint sconto partner.
             add_filter('latepoint_full_amount', [$this, 'apply_partner_discount'], 20, 3);
@@ -802,6 +803,7 @@ class SOS_PG_Plugin {
             add_submenu_page('sos-partner-gateway', 'Log', 'Log', 'manage_options', 'sos-partner-gateway', [$this, 'render_logs_page']);
             add_submenu_page('sos-partner-gateway', 'Impostazioni', 'Impostazioni', 'manage_options', 'sos-partner-gateway-settings', [$this, 'render_settings_page']);
             add_submenu_page('sos-partner-gateway', 'Pagine Partner', 'Pagine Partner', 'manage_options', 'sos-partner-gateway-pages', [$this, 'render_pages_page']);
+            add_submenu_page('sos-partner-gateway', 'Partner multipli (beta)', 'Partner multipli (beta)', 'manage_options', 'sos-partner-gateway-partners', [$this, 'render_partner_configs_page']);
             add_submenu_page('sos-partner-gateway', 'Test pagamento', 'Test pagamento', 'manage_options', 'sos-partner-gateway-payment-test', [$this, 'render_test_payment_page']);
         }
     }
@@ -1007,6 +1009,194 @@ class SOS_PG_Plugin {
             echo '<p><button class="button button-primary" type="submit">Salva configurazione partner</button></p>';
             echo '</form></div>';
         }
+    }
+
+    public function render_partner_configs_page() {
+        if (!current_user_can('manage_options')) {
+            wp_die('Non autorizzato');
+        }
+
+        $configs = $this->settings_helper->get_partner_configs_option();
+        if (!is_array($configs)) {
+            $configs = [];
+        }
+
+        // Aggiungi una riga vuota per inserimento rapido.
+        $configs[''] = [
+            'partner_id' => '',
+            'enabled' => true,
+            'type' => 'wordpress',
+            'integration_mode' => '',
+            'api_base_url' => '',
+            'api_key' => '',
+            'public_key_pem' => '',
+            'private_key_pem' => '',
+            'webhook_url' => '',
+            'webhook_secret' => '',
+            'callback_secret' => '',
+            'no_upfront_cost' => false,
+            'notes' => '',
+            'flags' => [],
+            'metadata' => [],
+        ];
+
+        echo '<div class="wrap">';
+        echo '<h1>Partner multipli (beta)</h1>';
+        if (isset($_GET['msg']) && $_GET['msg'] === 'saved') {
+            echo '<div class="notice notice-success is-dismissible"><p>Configurazione salvata.</p></div>';
+        }
+        echo '<p>Nuovo layer di configurazione partner. Le impostazioni esistenti restano invariate.</p>';
+
+        echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+        wp_nonce_field('sos_pg_save_partner_configs');
+        echo '<input type="hidden" name="action" value="sos_pg_save_partner_configs" />';
+
+        echo '<table class="widefat fixed striped">';
+        echo '<thead><tr>';
+        $cols = [
+            'Partner ID', 'Abilitato', 'Tipo', 'Integration mode', 'API base URL', 'API key',
+            'Public key PEM', 'Private key PEM', 'Webhook URL', 'Webhook secret', 'Callback secret',
+            'No upfront cost', 'Note', 'Flags (JSON)', 'Metadata (JSON)'
+        ];
+        foreach ($cols as $col) {
+            echo '<th>' . esc_html($col) . '</th>';
+        }
+        echo '</tr></thead><tbody>';
+
+        $index = 0;
+        foreach ($configs as $pid => $cfg) {
+            $pid_val = $pid !== '' ? $pid : '';
+            $enabled = !empty($cfg['enabled']);
+            $type = isset($cfg['type']) ? $cfg['type'] : 'wordpress';
+            $integration_mode = isset($cfg['integration_mode']) ? $cfg['integration_mode'] : '';
+            $api_base_url = isset($cfg['api_base_url']) ? $cfg['api_base_url'] : '';
+            $api_key = isset($cfg['api_key']) ? $cfg['api_key'] : '';
+            $public_key_pem = isset($cfg['public_key_pem']) ? $cfg['public_key_pem'] : '';
+            $private_key_pem = isset($cfg['private_key_pem']) ? $cfg['private_key_pem'] : '';
+            $webhook_url = isset($cfg['webhook_url']) ? $cfg['webhook_url'] : '';
+            $webhook_secret = isset($cfg['webhook_secret']) ? $cfg['webhook_secret'] : '';
+            $callback_secret = isset($cfg['callback_secret']) ? $cfg['callback_secret'] : '';
+            $no_upfront_cost = !empty($cfg['no_upfront_cost']);
+            $notes = isset($cfg['notes']) ? $cfg['notes'] : '';
+            $flags = isset($cfg['flags']) ? $cfg['flags'] : [];
+            $metadata = isset($cfg['metadata']) ? $cfg['metadata'] : [];
+
+            $flags_json = is_array($flags) ? wp_json_encode($flags) : (string) $flags;
+            $metadata_json = is_array($metadata) ? wp_json_encode($metadata) : (string) $metadata;
+
+            $pid_readonly = $pid_val !== '' ? 'readonly' : '';
+
+            echo '<tr>';
+            echo '<td><input type="text" name="partners[' . esc_attr($index) . '][partner_id]" value="' . esc_attr($pid_val) . '" class="regular-text" ' . $pid_readonly . ' /></td>';
+            echo '<td><label><input type="checkbox" name="partners[' . esc_attr($index) . '][enabled]" value="1" ' . checked($enabled, true, false) . ' /> abilitato</label></td>';
+            echo '<td><select name="partners[' . esc_attr($index) . '][type]">';
+            foreach (['wordpress', 'external_api', 'embedded_booking'] as $opt) {
+                echo '<option value="' . esc_attr($opt) . '" ' . selected($type, $opt, false) . '>' . esc_html($opt) . '</option>';
+            }
+            echo '</select></td>';
+            echo '<td><input type="text" name="partners[' . esc_attr($index) . '][integration_mode]" value="' . esc_attr($integration_mode) . '" class="regular-text" /></td>';
+            echo '<td><input type="text" name="partners[' . esc_attr($index) . '][api_base_url]" value="' . esc_attr($api_base_url) . '" class="regular-text" /></td>';
+            echo '<td><input type="text" name="partners[' . esc_attr($index) . '][api_key]" value="' . esc_attr($api_key) . '" class="regular-text" /></td>';
+            echo '<td><textarea name="partners[' . esc_attr($index) . '][public_key_pem]" rows="2" class="large-text">' . esc_textarea($public_key_pem) . '</textarea></td>';
+            echo '<td><textarea name="partners[' . esc_attr($index) . '][private_key_pem]" rows="2" class="large-text">' . esc_textarea($private_key_pem) . '</textarea></td>';
+            echo '<td><input type="text" name="partners[' . esc_attr($index) . '][webhook_url]" value="' . esc_attr($webhook_url) . '" class="regular-text" /></td>';
+            echo '<td><input type="text" name="partners[' . esc_attr($index) . '][webhook_secret]" value="' . esc_attr($webhook_secret) . '" class="regular-text" /></td>';
+            echo '<td><input type="text" name="partners[' . esc_attr($index) . '][callback_secret]" value="' . esc_attr($callback_secret) . '" class="regular-text" /></td>';
+            echo '<td><label><input type="checkbox" name="partners[' . esc_attr($index) . '][no_upfront_cost]" value="1" ' . checked($no_upfront_cost, true, false) . ' /> sì</label></td>';
+            echo '<td><textarea name="partners[' . esc_attr($index) . '][notes]" rows="2" class="large-text">' . esc_textarea($notes) . '</textarea></td>';
+            echo '<td><textarea name="partners[' . esc_attr($index) . '][flags]" rows="2" class="large-text" placeholder="JSON">' . esc_textarea($flags_json) . '</textarea></td>';
+            echo '<td><textarea name="partners[' . esc_attr($index) . '][metadata]" rows="2" class="large-text" placeholder="JSON">' . esc_textarea($metadata_json) . '</textarea></td>';
+            echo '</tr>';
+
+            $index++;
+        }
+
+        echo '</tbody></table>';
+        echo '<p class="submit"><button class="button button-primary">Salva configurazione</button></p>';
+        echo '</form>';
+        echo '</div>';
+    }
+
+    public function handle_save_partner_configs() {
+        if (!current_user_can('manage_options')) {
+            wp_die('Non autorizzato');
+        }
+
+        check_admin_referer('sos_pg_save_partner_configs');
+
+        $partners = isset($_POST['partners']) && is_array($_POST['partners']) ? $_POST['partners'] : [];
+        $clean = [];
+
+        foreach ($partners as $entry) {
+            $partner_id = sanitize_text_field($entry['partner_id'] ?? '');
+            if ($partner_id === '') {
+                continue;
+            }
+
+            $type = sanitize_text_field($entry['type'] ?? 'wordpress');
+            if (!in_array($type, ['wordpress', 'external_api', 'embedded_booking'], true)) {
+                $type = 'wordpress';
+            }
+
+            $cfg = [
+                'partner_id' => $partner_id,
+                'enabled' => !empty($entry['enabled']),
+                'type' => $type,
+                'integration_mode' => sanitize_text_field($entry['integration_mode'] ?? ''),
+                'api_base_url' => esc_url_raw($entry['api_base_url'] ?? ''),
+                'api_key' => (string) ($entry['api_key'] ?? ''),
+                'public_key_pem' => (string) ($entry['public_key_pem'] ?? ''),
+                'private_key_pem' => (string) ($entry['private_key_pem'] ?? ''),
+                'webhook_url' => esc_url_raw($entry['webhook_url'] ?? ''),
+                'webhook_secret' => (string) ($entry['webhook_secret'] ?? ''),
+                'callback_secret' => (string) ($entry['callback_secret'] ?? ''),
+                'no_upfront_cost' => !empty($entry['no_upfront_cost']),
+                'notes' => sanitize_textarea_field($entry['notes'] ?? ''),
+            ];
+
+            $flags_raw = isset($entry['flags']) ? (string) $entry['flags'] : '';
+            $metadata_raw = isset($entry['metadata']) ? (string) $entry['metadata'] : '';
+
+            $cfg['flags'] = $this->parse_json_array_or_csv_list($flags_raw);
+            $cfg['metadata'] = $this->parse_json_struct_or_empty($metadata_raw);
+
+            $clean[$partner_id] = $cfg;
+        }
+
+        update_option($this->settings_helper->get_partner_configs_key(), $clean, false);
+
+        wp_safe_redirect(admin_url('admin.php?page=sos-partner-gateway-partners&msg=saved'));
+        exit;
+    }
+
+    private function parse_json_array_or_csv_list($raw) {
+        $raw = trim((string) $raw);
+        if ($raw === '') {
+            return [];
+        }
+
+        $decoded = json_decode($raw, true);
+        if (is_array($decoded)) {
+            return $decoded;
+        }
+
+        // Fallback: split by comma for quick entry.
+        $parts = array_filter(array_map('trim', explode(',', $raw)), 'strlen');
+        return array_values($parts);
+    }
+
+    private function parse_json_struct_or_empty($raw) {
+        $raw = trim((string) $raw);
+        if ($raw === '') {
+            return [];
+        }
+
+        $decoded = json_decode($raw, true);
+        if (is_array($decoded)) {
+            return $decoded;
+        }
+
+        return [];
     }
     public function render_pages_page() {
         if (!current_user_can('manage_options')) {

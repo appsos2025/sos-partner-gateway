@@ -43,6 +43,50 @@ class SOS_PG_Partner_Registry {
         return '';
     }
 
+    public function get_partner_config($partner_id) {
+        $partner_id = sanitize_text_field((string) $partner_id);
+        if ($partner_id === '') {
+            return null;
+        }
+
+        $map = $this->settings->get_partner_configs_raw();
+        if (!isset($map[$partner_id]) || !is_array($map[$partner_id])) {
+            return null;
+        }
+
+        $cfg = $map[$partner_id];
+
+        $cfg['partner_id'] = $partner_id;
+        $cfg['enabled'] = !empty($cfg['enabled']);
+        $cfg['type'] = sanitize_text_field((string) ($cfg['type'] ?? 'wordpress'));
+        $cfg['integration_mode'] = sanitize_text_field((string) ($cfg['integration_mode'] ?? ''));
+        $cfg['api_base_url'] = isset($cfg['api_base_url']) ? esc_url_raw((string) $cfg['api_base_url']) : '';
+        $cfg['api_key'] = isset($cfg['api_key']) ? (string) $cfg['api_key'] : '';
+        $cfg['public_key_pem'] = isset($cfg['public_key_pem']) ? (string) $cfg['public_key_pem'] : '';
+        $cfg['private_key_pem'] = isset($cfg['private_key_pem']) ? (string) $cfg['private_key_pem'] : '';
+        $cfg['webhook_url'] = isset($cfg['webhook_url']) ? esc_url_raw((string) $cfg['webhook_url']) : '';
+        $cfg['webhook_secret'] = isset($cfg['webhook_secret']) ? (string) $cfg['webhook_secret'] : '';
+        $cfg['callback_secret'] = isset($cfg['callback_secret']) ? (string) $cfg['callback_secret'] : '';
+        $cfg['flags'] = isset($cfg['flags']) && is_array($cfg['flags']) ? $cfg['flags'] : [];
+        $cfg['metadata'] = isset($cfg['metadata']) && is_array($cfg['metadata']) ? $cfg['metadata'] : [];
+
+        return $cfg;
+    }
+
+    public function get_partner_configs() {
+        $raw = $this->settings->get_partner_configs_raw();
+        $normalized = [];
+
+        foreach ($raw as $pid => $_) {
+            $cfg = $this->get_partner_config($pid);
+            if ($cfg !== null) {
+                $normalized[$pid] = $cfg;
+            }
+        }
+
+        return $normalized;
+    }
+
     public function get_external_api_partner($partner_id) {
         $partner_id = sanitize_text_field((string) $partner_id);
         if ($partner_id === '') {

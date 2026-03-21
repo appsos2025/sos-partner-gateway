@@ -6,6 +6,7 @@ class SOS_PG_Settings {
     private $routes_key;
     private $discounts_key;
     private $webhooks_key;
+    private $partner_configs_key = 'sos_pg_partner_configs';
 
     public function __construct(
         $settings_key = 'sos_pg_settings',
@@ -33,6 +34,10 @@ class SOS_PG_Settings {
 
     public function get_webhooks_key() {
         return $this->webhooks_key;
+    }
+
+    public function get_partner_configs_key() {
+        return $this->partner_configs_key;
     }
 
     public function get_settings() {
@@ -90,7 +95,95 @@ class SOS_PG_Settings {
             }
         }
 
-        return $routes;
+        $admin_cfgs = $this->get_partner_configs_option();
+
+        // Admin-managed configs take precedence; keep legacy routes for missing IDs.
+        foreach ($routes as $pid => $cfg) {
+            if (!isset($admin_cfgs[$pid])) {
+                $admin_cfgs[$pid] = $cfg;
+            }
+        }
+
+        return $admin_cfgs;
+    }
+
+    public function get_partner_configs_option() {
+        $map = get_option($this->partner_configs_key, []);
+        return is_array($map) ? $map : [];
+    }
+
+    public function get_partner_configs_raw() {
+        $routes = $this->get_partner_routes_raw();
+        $webhooks = $this->get_partner_webhooks();
+
+        $partner_ids = array_unique(array_merge(array_keys((array) $routes), array_keys((array) $webhooks)));
+
+        $base_defaults = [
+            'partner_id' => '',
+            'enabled' => true,
+            'type' => 'wordpress',
+            'integration_mode' => '',
+            'api_base_url' => '',
+            'api_key' => '',
+            'public_key_pem' => '',
+            'private_key_pem' => '',
+            'webhook_url' => '',
+            'webhook_secret' => '',
+            'callback_secret' => '',
+            'flags' => [],
+            'metadata' => [],
+        ];
+
+        $map = [];
+
+        foreach ($partner_ids as $pid) {
+            $pid_clean = sanitize_text_field((string) $pid);
+            if ($pid_clean === '') {
+                continue;
+            }
+
+            $route_entry = $routes[$pid] ?? null;
+            $webhook_entry = $webhooks[$pid] ?? null;
+
+            $is_route_array = is_array($route_entry);
+            $is_webhook_array = is_array($webhook_entry);
+
+            $cfg = $base_defaults;
+            $cfg['partner_id'] = $pid_clean;
+
+            if ($is_route_array) {
+                $cfg = array_merge($cfg, $route_entry);
+            } elseif (is_string($route_entry) && $route_entry !== '') {
+                // Legacy string route: treat as wordpress login/redirect path.
+                $cfg['type'] = $cfg['type'] ?: 'wordpress';
+                $cfg['integration_mode'] = $cfg['integration_mode'] ?: 'login_redirect';
+                $cfg['metadata']['route'] = $route_entry;
+            }
+
+            if ($is_webhook_array) {
+                if (isset($webhook_entry['url'])) {
+                    $cfg['webhook_url'] = (string) $webhook_entry['url'];
+                }
+                if (isset($webhook_entry['secret'])) {
+                    $cfg['webhook_secret'] = (string) $webhook_entry['secret'];
+                }
+                if (isset($webhook_entry['callback_secret'])) {
+                    $cfg['callback_secret'] = (string) $webhook_entry['callback_secret'];
+                }
+            }
+
+            // Normalize arrays.
+            if (!is_array($cfg['flags'])) {
+                $cfg['flags'] = [];
+            }
+            if (!is_array($cfg['metadata'])) {
+                $cfg['metadata'] = [];
+            }
+
+            $map[$pid_clean] = $cfg;
+        }
+
+        return $map;
     }
 
     public function get_partner_discounts() {
