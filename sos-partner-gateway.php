@@ -15,6 +15,7 @@ define('SOS_PG_TABLE_LOGS', 'sos_partner_gateway_logs');
 require_once SOS_PG_DIR . 'includes/core/class-sos-pg-settings.php';
 require_once SOS_PG_DIR . 'includes/core/class-sos-pg-partner-registry.php';
 require_once SOS_PG_DIR . 'includes/core/class-sos-pg-request.php';
+require_once SOS_PG_DIR . 'includes/rest/class-sos-pg-rest-router.php';
 
 require_once SOS_PG_DIR . 'includes/class-sos-pg-plugin.php';
 

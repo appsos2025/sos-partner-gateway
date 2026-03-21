@@ -14,6 +14,7 @@ class SOS_PG_Plugin {
     private $partner_original_total = null;
     private $settings_helper;
     private $partner_registry;
+    private $rest_router;
 
     public static function instance() {
         if (self::$instance === null) {
@@ -30,6 +31,7 @@ class SOS_PG_Plugin {
 
         $this->settings_helper = new SOS_PG_Settings($this->settings_key, $this->routes_key, $this->discounts_key, $this->webhooks_key);
         $this->partner_registry = new SOS_PG_Partner_Registry($this->settings_helper);
+        $this->rest_router = new SOS_PG_REST_Router($this);
 
         register_activation_hook(SOS_PG_FILE, [$this, 'activate']);
 
@@ -184,6 +186,25 @@ class SOS_PG_Plugin {
 
     private function is_partner_mode() {
         return $this->get_settings()['site_role'] === 'partner';
+    }
+
+    public function get_health_payload() {
+        if (!function_exists('get_plugin_data')) {
+            require_once ABSPATH . 'wp-admin/includes/plugin.php';
+        }
+
+        $plugin_data = function_exists('get_plugin_data') ? get_plugin_data(SOS_PG_FILE, false, false) : [];
+        $version = isset($plugin_data['Version']) ? (string) $plugin_data['Version'] : '';
+        $settings = $this->get_settings();
+        $site_role = ($settings['site_role'] ?? '') === 'partner' ? 'partner' : 'main';
+
+        return [
+            'ok' => true,
+            'plugin' => 'sos-partner-gateway',
+            'version' => $version,
+            'site_role' => $site_role,
+            'timestamp' => current_time('mysql'),
+        ];
     }
 
     private function get_partner_routes() {
