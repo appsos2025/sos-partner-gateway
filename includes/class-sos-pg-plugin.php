@@ -12,6 +12,8 @@ class SOS_PG_Plugin {
     private $webhooks_key = 'sos_pg_partner_webhooks';
     private $tester_webhook_key = 'sos_pg_main_last_webhook';
     private $partner_original_total = null;
+    private $settings_helper;
+    private $partner_registry;
 
     public static function instance() {
         if (self::$instance === null) {
@@ -25,6 +27,9 @@ class SOS_PG_Plugin {
         $this->table_logs = $wpdb->prefix . SOS_PG_TABLE_LOGS;
         $this->booking_table = $wpdb->prefix . 'latepoint_bookings';
         $this->booking_meta_table = $wpdb->prefix . 'latepoint_booking_meta';
+
+        $this->settings_helper = new SOS_PG_Settings($this->settings_key, $this->routes_key, $this->discounts_key, $this->webhooks_key);
+        $this->partner_registry = new SOS_PG_Partner_Registry($this->settings_helper);
 
         register_activation_hook(SOS_PG_FILE, [$this, 'activate']);
 

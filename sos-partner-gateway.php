@@ -12,6 +12,10 @@ define('SOS_PG_FILE', __FILE__);
 define('SOS_PG_DIR', plugin_dir_path(__FILE__));
 define('SOS_PG_TABLE_LOGS', 'sos_partner_gateway_logs');
 
+require_once SOS_PG_DIR . 'includes/core/class-sos-pg-settings.php';
+require_once SOS_PG_DIR . 'includes/core/class-sos-pg-partner-registry.php';
+require_once SOS_PG_DIR . 'includes/core/class-sos-pg-request.php';
+
 require_once SOS_PG_DIR . 'includes/class-sos-pg-plugin.php';
 
 SOS_PG_Plugin::instance();
