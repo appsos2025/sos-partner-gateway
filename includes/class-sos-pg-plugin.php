@@ -14,6 +14,7 @@ class SOS_PG_Plugin {
     private $partner_original_total = null;
     private $settings_helper;
     private $partner_registry;
+    private $embedded_booking;
     private $rest_router;
     private $handoff_token;
 
@@ -32,6 +33,7 @@ class SOS_PG_Plugin {
 
         $this->settings_helper = new SOS_PG_Settings($this->settings_key, $this->routes_key, $this->discounts_key, $this->webhooks_key);
         $this->partner_registry = new SOS_PG_Partner_Registry($this->settings_helper);
+        $this->embedded_booking = new SOS_PG_Embedded_Booking($this->partner_registry);
         $this->handoff_token = new SOS_PG_Handoff_Token();
         $this->rest_router = new SOS_PG_REST_Router($this);
 
@@ -193,6 +195,10 @@ class SOS_PG_Plugin {
 
     public function get_partner_registry() {
         return $this->partner_registry;
+    }
+
+    public function get_embedded_booking_service() {
+        return $this->embedded_booking;
     }
 
     public function get_handoff_token_service() {
@@ -1047,6 +1053,8 @@ class SOS_PG_Plugin {
             'webhook_secret' => '',
             'callback_secret' => '',
             'no_upfront_cost' => false,
+            'validation_token_strategy' => '',
+            'external_ref_mapping' => '',
             'notes' => '',
             'flags' => [],
             'metadata' => [],
@@ -1068,7 +1076,7 @@ class SOS_PG_Plugin {
         $cols = [
             'Partner ID', 'Abilitato', 'Tipo', 'Integration mode', 'API base URL', 'API key',
             'Public key PEM', 'Private key PEM', 'Webhook URL', 'Webhook secret', 'Callback secret',
-            'No upfront cost', 'Note', 'Flags (JSON)', 'Metadata (JSON)'
+            'No upfront cost', 'Validation token strategy', 'External ref mapping', 'Note', 'Flags (JSON)', 'Metadata (JSON)'
         ];
         foreach ($cols as $col) {
             echo '<th>' . esc_html($col) . '</th>';
@@ -1089,6 +1097,8 @@ class SOS_PG_Plugin {
             $webhook_secret = isset($cfg['webhook_secret']) ? $cfg['webhook_secret'] : '';
             $callback_secret = isset($cfg['callback_secret']) ? $cfg['callback_secret'] : '';
             $no_upfront_cost = !empty($cfg['no_upfront_cost']);
+            $validation_token_strategy = isset($cfg['validation_token_strategy']) ? $cfg['validation_token_strategy'] : '';
+            $external_ref_mapping = isset($cfg['external_ref_mapping']) ? $cfg['external_ref_mapping'] : '';
             $notes = isset($cfg['notes']) ? $cfg['notes'] : '';
             $flags = isset($cfg['flags']) ? $cfg['flags'] : [];
             $metadata = isset($cfg['metadata']) ? $cfg['metadata'] : [];
@@ -1115,6 +1125,8 @@ class SOS_PG_Plugin {
             echo '<td><input type="text" name="partners[' . esc_attr($index) . '][webhook_secret]" value="' . esc_attr($webhook_secret) . '" class="regular-text" /></td>';
             echo '<td><input type="text" name="partners[' . esc_attr($index) . '][callback_secret]" value="' . esc_attr($callback_secret) . '" class="regular-text" /></td>';
             echo '<td><label><input type="checkbox" name="partners[' . esc_attr($index) . '][no_upfront_cost]" value="1" ' . checked($no_upfront_cost, true, false) . ' /> sì</label></td>';
+            echo '<td><input type="text" name="partners[' . esc_attr($index) . '][validation_token_strategy]" value="' . esc_attr($validation_token_strategy) . '" class="regular-text" placeholder="es. bearer_token" /></td>';
+            echo '<td><input type="text" name="partners[' . esc_attr($index) . '][external_ref_mapping]" value="' . esc_attr($external_ref_mapping) . '" class="regular-text" placeholder="es. booking_id" /></td>';
             echo '<td><textarea name="partners[' . esc_attr($index) . '][notes]" rows="2" class="large-text">' . esc_textarea($notes) . '</textarea></td>';
             echo '<td><textarea name="partners[' . esc_attr($index) . '][flags]" rows="2" class="large-text" placeholder="JSON">' . esc_textarea($flags_json) . '</textarea></td>';
             echo '<td><textarea name="partners[' . esc_attr($index) . '][metadata]" rows="2" class="large-text" placeholder="JSON">' . esc_textarea($metadata_json) . '</textarea></td>';
@@ -1162,6 +1174,8 @@ class SOS_PG_Plugin {
                 'webhook_url' => esc_url_raw($entry['webhook_url'] ?? ''),
                 'webhook_secret' => (string) ($entry['webhook_secret'] ?? ''),
                 'callback_secret' => (string) ($entry['callback_secret'] ?? ''),
+                'validation_token_strategy' => sanitize_text_field($entry['validation_token_strategy'] ?? ''),
+                'external_ref_mapping' => sanitize_text_field($entry['external_ref_mapping'] ?? ''),
                 'no_upfront_cost' => !empty($entry['no_upfront_cost']),
                 'notes' => sanitize_textarea_field($entry['notes'] ?? ''),
             ];

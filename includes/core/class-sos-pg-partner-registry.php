@@ -67,6 +67,9 @@ class SOS_PG_Partner_Registry {
         $cfg['webhook_url'] = isset($cfg['webhook_url']) ? esc_url_raw((string) $cfg['webhook_url']) : '';
         $cfg['webhook_secret'] = isset($cfg['webhook_secret']) ? (string) $cfg['webhook_secret'] : '';
         $cfg['callback_secret'] = isset($cfg['callback_secret']) ? (string) $cfg['callback_secret'] : '';
+        $cfg['validation_token_strategy'] = isset($cfg['validation_token_strategy']) ? sanitize_text_field((string) $cfg['validation_token_strategy']) : '';
+        $cfg['no_upfront_cost'] = !empty($cfg['no_upfront_cost']);
+        $cfg['external_ref_mapping'] = isset($cfg['external_ref_mapping']) ? sanitize_text_field((string) $cfg['external_ref_mapping']) : '';
         $cfg['flags'] = isset($cfg['flags']) && is_array($cfg['flags']) ? $cfg['flags'] : [];
         $cfg['metadata'] = isset($cfg['metadata']) && is_array($cfg['metadata']) ? $cfg['metadata'] : [];
 
@@ -122,5 +125,36 @@ class SOS_PG_Partner_Registry {
         }
 
         return null;
+    }
+
+    public function get_embedded_booking_partner($partner_id) {
+        $partner_id = sanitize_text_field((string) $partner_id);
+        if ($partner_id === '') {
+            return null;
+        }
+
+        $cfg = $this->get_partner_config($partner_id);
+        if (!$cfg || ($cfg['type'] ?? '') !== 'embedded_booking') {
+            return null;
+        }
+
+        return [
+            'partner_id' => $cfg['partner_id'],
+            'enabled' => !empty($cfg['enabled']),
+            'validation_token_strategy' => $cfg['validation_token_strategy'] ?? '',
+            'no_upfront_cost' => !empty($cfg['no_upfront_cost']),
+            'external_ref_mapping' => $cfg['external_ref_mapping'] ?? '',
+            'metadata' => isset($cfg['metadata']) && is_array($cfg['metadata']) ? $cfg['metadata'] : [],
+        ];
+    }
+
+    public function get_validation_token_strategy($partner_id) {
+        $cfg = $this->get_partner_config($partner_id);
+        return $cfg ? (string) ($cfg['validation_token_strategy'] ?? '') : '';
+    }
+
+    public function get_external_reference_mapping($partner_id) {
+        $cfg = $this->get_partner_config($partner_id);
+        return $cfg ? (string) ($cfg['external_ref_mapping'] ?? '') : '';
     }
 }

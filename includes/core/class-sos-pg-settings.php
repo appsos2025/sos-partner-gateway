@@ -130,6 +130,9 @@ class SOS_PG_Settings {
             'webhook_url' => '',
             'webhook_secret' => '',
             'callback_secret' => '',
+            'validation_token_strategy' => '',
+            'no_upfront_cost' => false,
+            'external_ref_mapping' => '',
             'flags' => [],
             'metadata' => [],
         ];
