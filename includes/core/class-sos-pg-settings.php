@@ -72,8 +72,25 @@ class SOS_PG_Settings {
     }
 
     public function get_partner_routes_raw() {
+        $defaults = [
+            'caf-ext' => [
+                'type' => 'external_api',
+                'api_base_url' => 'https://cafsanitario.sosmedico.org',
+                'enabled' => true,
+                'api_key' => 'test-key-internal-only',
+            ],
+        ];
+
         $routes = get_option($this->routes_key, []);
-        return is_array($routes) ? $routes : [];
+        $routes = is_array($routes) ? $routes : [];
+
+        foreach ($defaults as $pid => $cfg) {
+            if (!isset($routes[$pid])) {
+                $routes[$pid] = $cfg; // test config, safe to remove later
+            }
+        }
+
+        return $routes;
     }
 
     public function get_partner_discounts() {

@@ -32,6 +32,23 @@ class SOS_PG_REST_Router {
                 ],
             ],
         ]);
+
+        register_rest_route('sos-pg/v1', '/handoff/verify', [
+            'methods' => WP_REST_Server::READABLE,
+            'permission_callback' => '__return_true',
+            'callback' => [$this, 'handle_handoff_verify'],
+        ]);
+
+        register_rest_route('sos-pg/v1', '/handoff/(?P<partner_id>(?!verify$)[A-Za-z0-9_-]{1,64})', [
+            'methods' => WP_REST_Server::READABLE,
+            'permission_callback' => '__return_true',
+            'callback' => [$this, 'handle_handoff_issue'],
+            'args' => [
+                'partner_id' => [
+                    'sanitize_callback' => 'sanitize_text_field',
+                ],
+            ],
+        ]);
     }
 
     public function handle_health(WP_REST_Request $request) {
@@ -81,6 +98,70 @@ class SOS_PG_REST_Router {
             'user_id' => (int) $user->ID,
             'email' => (string) $user->user_email,
             'partner_id' => $partner_id,
+        ]);
+    }
+
+    public function handle_handoff_issue(WP_REST_Request $request) {
+        if (!is_user_logged_in()) {
+            return new WP_Error('sos_pg_handoff_forbidden', 'Autenticazione richiesta', ['status' => 403]);
+        }
+
+        $partner_id = sanitize_text_field((string) $request->get_param('partner_id'));
+        $registry = $this->plugin->get_partner_registry();
+        $config = $registry ? $registry->get_external_api_partner($partner_id) : null;
+
+        if (!$config || ($config['type'] ?? '') !== 'external_api' || empty($config['enabled'])) {
+            return new WP_Error('sos_pg_partner_not_found', 'Partner non trovato', ['status' => 404]);
+        }
+
+        $user = wp_get_current_user();
+        if (!$user || !$user->ID) {
+            return new WP_Error('sos_pg_handoff_forbidden', 'Autenticazione richiesta', ['status' => 403]);
+        }
+
+        $handoff = $this->plugin->get_handoff_token_service();
+        $issued = $handoff->issue($user->ID, $user->user_email, $partner_id);
+
+        return new WP_REST_Response([
+            'ok' => true,
+            'partner_id' => $partner_id,
+            'token' => $issued['token'],
+            'expires_at' => (int) $issued['expires_at'],
+        ]);
+    }
+
+    public function handle_handoff_verify(WP_REST_Request $request) {
+        $token = (string) $request->get_param('token');
+        if ($token === '') {
+            $auth = (string) $request->get_header('authorization');
+            if ($auth && stripos($auth, 'bearer ') === 0) {
+                $token = trim(substr($auth, 7));
+            }
+        }
+
+        if ($token === '') {
+            return new WP_Error('sos_pg_handoff_invalid', 'Token mancante', ['status' => 401]);
+        }
+
+        $handoff = $this->plugin->get_handoff_token_service();
+        $verified = $handoff->verify($token);
+
+        if (is_wp_error($verified)) {
+            return new WP_Error('sos_pg_handoff_invalid', 'Token non valido o scaduto', ['status' => 401]);
+        }
+
+        $registry = $this->plugin->get_partner_registry();
+        $config = $registry ? $registry->get_external_api_partner($verified['partner_id']) : null;
+        if (!$config || ($config['type'] ?? '') !== 'external_api' || empty($config['enabled'])) {
+            return new WP_Error('sos_pg_handoff_invalid', 'Token non valido o scaduto', ['status' => 401]);
+        }
+
+        return new WP_REST_Response([
+            'ok' => true,
+            'user_id' => (int) $verified['user_id'],
+            'email' => (string) $verified['email'],
+            'partner_id' => (string) $verified['partner_id'],
+            'expires_at' => (int) $verified['expires_at'],
         ]);
     }
 }

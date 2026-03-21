@@ -15,6 +15,7 @@ class SOS_PG_Plugin {
     private $settings_helper;
     private $partner_registry;
     private $rest_router;
+    private $handoff_token;
 
     public static function instance() {
         if (self::$instance === null) {
@@ -31,6 +32,7 @@ class SOS_PG_Plugin {
 
         $this->settings_helper = new SOS_PG_Settings($this->settings_key, $this->routes_key, $this->discounts_key, $this->webhooks_key);
         $this->partner_registry = new SOS_PG_Partner_Registry($this->settings_helper);
+        $this->handoff_token = new SOS_PG_Handoff_Token();
         $this->rest_router = new SOS_PG_REST_Router($this);
 
         register_activation_hook(SOS_PG_FILE, [$this, 'activate']);
@@ -190,6 +192,10 @@ class SOS_PG_Plugin {
 
     public function get_partner_registry() {
         return $this->partner_registry;
+    }
+
+    public function get_handoff_token_service() {
+        return $this->handoff_token;
     }
 
     public function get_health_payload() {
