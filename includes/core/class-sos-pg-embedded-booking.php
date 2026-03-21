@@ -110,6 +110,65 @@ class SOS_PG_Embedded_Booking {
             return $result;
         }
 
+        if ($strategy === 'jwt_rs256') {
+            $token = (string) ($normalized_payload['token_raw'] ?? '');
+            $parts = explode('.', $token);
+            if (count($parts) !== 3) {
+                $result['errors'][] = 'jwt_malformed';
+                return $result;
+            }
+
+            list($h64, $p64, $s64) = $parts;
+            $header_json = $this->base64url_decode_safe($h64);
+            $payload_json = $this->base64url_decode_safe($p64);
+            $signature = $this->base64url_decode_safe($s64, true);
+
+            if ($header_json === null || $payload_json === null || $signature === null) {
+                $result['errors'][] = 'jwt_decode_error';
+                return $result;
+            }
+
+            $header = json_decode($header_json, true);
+            $payload = json_decode($payload_json, true);
+
+            if (!is_array($header) || !is_array($payload)) {
+                $result['errors'][] = 'jwt_json_error';
+                return $result;
+            }
+
+            $alg = isset($header['alg']) ? (string) $header['alg'] : '';
+            if (strtoupper($alg) !== 'RS256') {
+                $result['errors'][] = 'jwt_alg_mismatch';
+                return $result;
+            }
+
+            $cfg = $this->registry ? $this->registry->get_partner_config($partner_id) : null;
+            $pem = $cfg && !empty($cfg['public_key_pem']) ? trim((string) $cfg['public_key_pem']) : '';
+            if ($pem === '') {
+                $result['errors'][] = 'partner_key_missing';
+                return $result;
+            }
+
+            $pub = openssl_pkey_get_public($pem);
+            if (!$pub) {
+                $result['errors'][] = 'partner_key_invalid';
+                return $result;
+            }
+
+            $data = $h64 . '.' . $p64;
+            $ok = openssl_verify($data, $signature, $pub, OPENSSL_ALGO_SHA256);
+            openssl_free_key($pub);
+
+            if ($ok !== 1) {
+                $result['errors'][] = 'jwt_signature_invalid';
+                return $result;
+            }
+
+            $result['ok'] = true;
+            $result['claims'] = $this->filter_claims($payload);
+            return $result;
+        }
+
         $result['errors'][] = 'strategy_unsupported';
         return $result;
     }
@@ -117,5 +176,28 @@ class SOS_PG_Embedded_Booking {
     public function verify_token_payload($partner_id, $request_data) {
         $normalized = $this->normalize_token_payload($partner_id, $request_data);
         return $this->verify_normalized_token($partner_id, $normalized);
+    }
+
+    private function base64url_decode_safe($data, $binary = false) {
+        $data = strtr((string) $data, '-_', '+/');
+        $pad = strlen($data) % 4;
+        if ($pad) {
+            $data .= str_repeat('=', 4 - $pad);
+        }
+        $decoded = base64_decode($data, true);
+        if ($decoded === false) {
+            return null;
+        }
+        return $binary ? $decoded : $decoded;
+    }
+
+    private function filter_claims(array $claims) {
+        $safe = [];
+        foreach ($claims as $k => $v) {
+            if (is_scalar($v) || is_null($v)) {
+                $safe[$k] = $v;
+            }
+        }
+        return $safe;
     }
 }
