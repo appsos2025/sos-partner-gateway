@@ -52,6 +52,10 @@ class SOS_PG_Settings {
         $clean = [];
         foreach ($routes as $pid => $path) {
             $pid = sanitize_text_field((string) $pid);
+            if (is_array($path)) {
+                // Preserve backward compatibility: skip complex entries here.
+                continue;
+            }
             $path = trim((string) $path);
             if ($pid === '' || $path === '') {
                 continue;
@@ -65,6 +69,11 @@ class SOS_PG_Settings {
         }
 
         return $clean;
+    }
+
+    public function get_partner_routes_raw() {
+        $routes = get_option($this->routes_key, []);
+        return is_array($routes) ? $routes : [];
     }
 
     public function get_partner_discounts() {

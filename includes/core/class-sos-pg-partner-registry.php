@@ -42,4 +42,41 @@ class SOS_PG_Partner_Registry {
 
         return '';
     }
+
+    public function get_external_api_partner($partner_id) {
+        $partner_id = sanitize_text_field((string) $partner_id);
+        if ($partner_id === '') {
+            return null;
+        }
+
+        $sources = [
+            $this->settings->get_partner_routes_raw(),
+            $this->settings->get_partner_webhooks(),
+        ];
+
+        foreach ($sources as $map) {
+            if (!is_array($map) || !isset($map[$partner_id]) || !is_array($map[$partner_id])) {
+                continue;
+            }
+
+            $candidate = $map[$partner_id];
+            if (($candidate['type'] ?? '') !== 'external_api') {
+                continue;
+            }
+
+            $api_base_url = isset($candidate['api_base_url']) ? esc_url_raw((string) $candidate['api_base_url']) : '';
+            $api_key = isset($candidate['api_key']) ? (string) $candidate['api_key'] : '';
+            $enabled = !empty($candidate['enabled']);
+
+            return [
+                'partner_id' => $partner_id,
+                'type' => 'external_api',
+                'api_base_url' => $api_base_url,
+                'api_key' => $api_key,
+                'enabled' => $enabled,
+            ];
+        }
+
+        return null;
+    }
 }

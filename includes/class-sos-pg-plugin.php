@@ -188,6 +188,10 @@ class SOS_PG_Plugin {
         return $this->get_settings()['site_role'] === 'partner';
     }
 
+    public function get_partner_registry() {
+        return $this->partner_registry;
+    }
+
     public function get_health_payload() {
         if (!function_exists('get_plugin_data')) {
             require_once ABSPATH . 'wp-admin/includes/plugin.php';
