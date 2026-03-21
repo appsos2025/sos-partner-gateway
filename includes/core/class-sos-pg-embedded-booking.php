@@ -73,4 +73,49 @@ class SOS_PG_Embedded_Booking {
 
         return $payload;
     }
+
+    public function verify_normalized_token($partner_id, $normalized_payload) {
+        $result = [
+            'ok' => false,
+            'strategy' => (string) ($normalized_payload['token_strategy'] ?? ''),
+            'token_present' => ((string) ($normalized_payload['token_raw'] ?? '') !== ''),
+            'token_type' => (string) ($normalized_payload['token_type'] ?? ''),
+            'partner_id' => (string) ($normalized_payload['partner_id'] ?? ''),
+            'external_reference' => (string) ($normalized_payload['external_reference'] ?? ''),
+            'claims' => [],
+            'errors' => [],
+        ];
+
+        $strategy = $result['strategy'];
+
+        if ($strategy === '') {
+            $result['errors'][] = 'strategy_empty';
+            return $result;
+        }
+
+        if (!$result['token_present']) {
+            $result['errors'][] = 'token_missing';
+            return $result;
+        }
+
+        // Minimal scaffolded strategies
+        if ($strategy === 'passthrough') {
+            $result['ok'] = true;
+            return $result;
+        }
+
+        if ($strategy === 'opaque') {
+            // Token present but not validated; keep ok=false, note unsupported.
+            $result['errors'][] = 'opaque_unverified';
+            return $result;
+        }
+
+        $result['errors'][] = 'strategy_unsupported';
+        return $result;
+    }
+
+    public function verify_token_payload($partner_id, $request_data) {
+        $normalized = $this->normalize_token_payload($partner_id, $request_data);
+        return $this->verify_normalized_token($partner_id, $normalized);
+    }
 }
