@@ -1,0 +1,36 @@
+const crypto = require("crypto");
+const fetch = require("node-fetch");
+
+const url = "https://videoconsulto.sospediatra.org/partner-payment-callback/";
+const secret = "IL_TUO_PAYMENT_CALLBACK_SECRET";
+
+const data = {
+  booking_id: 14553,
+  transaction_id: "caf-14553-" + Date.now(),
+  status: "paid_partner",
+  partner_id: "caf",
+  amount_paid: 25.00,
+  currency: "EUR",
+  payment_provider: "stripe",
+  external_reference: "ORDER-12345"
+};
+
+const body = JSON.stringify(data);
+
+// HMAC
+const signature = crypto
+  .createHmac("sha256", secret)
+  .update(body)
+  .digest("hex");
+
+fetch(url, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "X-SOSPG-Signature": signature
+  },
+  body: body
+})
+.then(res => res.text())
+.then(res => console.log(res))
+.catch(err => console.error(err));

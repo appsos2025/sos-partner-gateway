@@ -173,6 +173,66 @@ class SOS_PG_Embedded_Booking {
         return $result;
     }
 
+    /**
+     * Basic identity validation for embedded booking payloads.
+     * Ensures email is present/valid; normalizes standard fields (email, first_name, last_name, phone, external_reference, validation_token)
+     * and keeps backward compatibility with legacy `name`.
+     */
+    public function validate_identity_payload($request_data) {
+        $get = function($key) use ($request_data) {
+            if (is_array($request_data) && isset($request_data[$key])) {
+                return $request_data[$key];
+            }
+            if (is_object($request_data) && method_exists($request_data, 'get_param')) {
+                return $request_data->get_param($key);
+            }
+            return null;
+        };
+
+        $email_raw = $get('email');
+        $name_raw = $get('name');
+        $first_raw = $get('first_name');
+        $last_raw = $get('last_name');
+        $phone_raw = $get('phone');
+        $ext_ref_raw = $get('external_reference');
+        $validation_token_raw = $get('validation_token');
+
+        $email = is_string($email_raw) ? sanitize_email($email_raw) : '';
+        $name = is_string($name_raw) ? sanitize_text_field($name_raw) : '';
+        $first_name = is_string($first_raw) ? sanitize_text_field($first_raw) : '';
+        $last_name = is_string($last_raw) ? sanitize_text_field($last_raw) : '';
+        $phone = is_string($phone_raw) ? sanitize_text_field($phone_raw) : '';
+        $external_reference = is_string($ext_ref_raw) ? sanitize_text_field($ext_ref_raw) : '';
+        $validation_token = is_string($validation_token_raw) ? sanitize_text_field($validation_token_raw) : '';
+
+        $customer_name = trim(($first_name . ' ' . $last_name));
+        if ($customer_name === '' && $name !== '') {
+            $customer_name = $name;
+            if ($first_name === '') {
+                $first_name = $customer_name; // fallback legacy name into first_name for compatibility
+            }
+        }
+
+        $errors = [];
+        if ($email === '' || !is_email($email)) {
+            $errors[] = 'email_invalid';
+        }
+
+        return [
+            'ok' => empty($errors),
+            'errors' => $errors,
+            'identity' => [
+                'email' => $email,
+                'first_name' => $first_name,
+                'last_name' => $last_name,
+                'customer_name' => $customer_name,
+                'phone' => $phone,
+                'external_reference' => $external_reference,
+                'validation_token' => $validation_token,
+            ],
+        ];
+    }
+
     public function verify_token_payload($partner_id, $request_data) {
         $normalized = $this->normalize_token_payload($partner_id, $request_data);
         return $this->verify_normalized_token($partner_id, $normalized);

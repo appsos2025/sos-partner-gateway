@@ -75,6 +75,18 @@ class SOS_PG_REST_Router {
                 ],
             ],
         ]);
+
+        register_rest_route('sos-pg/v1', '/embedded-booking/create', [
+            'methods' => WP_REST_Server::CREATABLE,
+            'permission_callback' => '__return_true',
+            'callback' => [$this, 'handle_embedded_booking_create'],
+            'args' => [
+                'partner_id' => [
+                    'sanitize_callback' => 'sanitize_text_field',
+                    'required' => true,
+                ],
+            ],
+        ]);
     }
 
     public function handle_health(WP_REST_Request $request) {
@@ -257,5 +269,88 @@ class SOS_PG_REST_Router {
             'errors' => $verification['errors'],
             'normalized_payload' => $normalized,
         ]);
+    }
+
+    public function handle_embedded_booking_create(WP_REST_Request $request) {
+        $partner_id = sanitize_text_field((string) $request->get_param('partner_id'));
+        if ($partner_id === '') {
+            return new WP_Error('sos_pg_invalid_partner', 'Partner non valido', ['status' => 404]);
+        }
+
+        $registry = $this->plugin->get_partner_registry();
+        $cfg = $registry ? $registry->get_embedded_booking_partner($partner_id) : null;
+        if (!$cfg || ($cfg['enabled'] ?? false) === false || ($cfg['type'] ?? '') !== 'embedded_booking') {
+            return new WP_Error('sos_pg_partner_not_embedded', 'Partner non configurato per embedded booking', ['status' => 404]);
+        }
+
+        $embedded = $this->plugin->get_embedded_booking_service();
+        if (!$embedded) {
+            return new WP_Error('sos_pg_service_unavailable', 'Servizio non disponibile', ['status' => 500]);
+        }
+
+        $normalized = $embedded->normalize_token_payload($partner_id, $request);
+        $verification = $embedded->verify_normalized_token($partner_id, $normalized);
+        if (!$verification['ok']) {
+            return new WP_Error('sos_pg_token_invalid', 'Token non valido', [
+                'status' => 401,
+                'errors' => $verification['errors'],
+                'strategy' => $verification['strategy'],
+            ]);
+        }
+
+        $identity = $embedded->validate_identity_payload($request);
+        if (!$identity['ok']) {
+            return new WP_Error('sos_pg_identity_invalid', 'Dati utente non validi', [
+                'status' => 400,
+                'errors' => $identity['errors'],
+            ]);
+        }
+
+        // Handoff payload per redirect verso il login/flow esistente.
+        $email = (string) $identity['identity']['email'];
+        $timestamp = time();
+        $nonce = wp_generate_password(12, false, false);
+        $message = $partner_id . '|' . $email . '|' . $timestamp . '|' . $nonce;
+
+        $cfg_full = $registry ? $registry->get_partner_config($partner_id) : null;
+        $pem = $cfg_full && !empty($cfg_full['private_key_pem']) ? trim((string) $cfg_full['private_key_pem']) : '';
+        if ($pem === '') {
+            return new WP_Error('sos_pg_partner_key_missing', 'Chiave privata partner mancante', ['status' => 500]);
+        }
+
+        $private_key = openssl_pkey_get_private($pem);
+        if (!$private_key) {
+            return new WP_Error('sos_pg_partner_key_invalid', 'Chiave privata partner non valida', ['status' => 500]);
+        }
+
+        $signature_raw = '';
+        $ok = openssl_sign($message, $signature_raw, $private_key, OPENSSL_ALGO_SHA256);
+        openssl_free_key($private_key);
+
+        if (!$ok) {
+            return new WP_Error('sos_pg_partner_sign_fail', 'Impossibile firmare il payload', ['status' => 500]);
+        }
+
+        $signature_b64 = base64_encode($signature_raw);
+        $redirect_url = $this->plugin->get_login_endpoint_url();
+
+        $response = [
+            'success' => true,
+            'partner_id' => $partner_id,
+            'redirect_url' => $redirect_url,
+            'handoff' => [
+                'partner_id' => $partner_id,
+                'payload' => $email,
+                'timestamp' => $timestamp,
+                'nonce' => $nonce,
+                'signature' => $signature_b64,
+            ],
+            'normalized_payload' => $normalized,
+            'verification' => $verification,
+            'identity' => $identity['identity'],
+            'booking_created' => false,
+        ];
+
+        return new WP_REST_Response($response);
     }
 }

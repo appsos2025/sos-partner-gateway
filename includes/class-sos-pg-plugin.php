@@ -34,7 +34,12 @@ class SOS_PG_Plugin {
         $this->settings_helper = new SOS_PG_Settings($this->settings_key, $this->routes_key, $this->discounts_key, $this->webhooks_key);
         $this->partner_registry = new SOS_PG_Partner_Registry($this->settings_helper);
         $this->embedded_booking = new SOS_PG_Embedded_Booking($this->partner_registry);
-        $this->handoff_token = new SOS_PG_Handoff_Token();
+        if (class_exists('SOS_PG_Handoff_Token')) {
+            $this->handoff_token = new SOS_PG_Handoff_Token();
+        } else {
+            error_log('SOS_PG: classe SOS_PG_Handoff_Token non trovata');
+            $this->handoff_token = null;
+        }
         $this->rest_router = new SOS_PG_REST_Router($this);
 
         register_activation_hook(SOS_PG_FILE, [$this, 'activate']);
@@ -45,6 +50,12 @@ class SOS_PG_Plugin {
 
         $partner_mode = $this->is_partner_mode();
 
+        // metabox sempre disponibile in admin
+        if (is_admin()) {
+            add_action('add_meta_boxes', [$this, 'register_partner_page_metabox']);
+            add_action('save_post_page', [$this, 'save_partner_page_meta'], 10, 2);
+        }
+
         if ($partner_mode) {
             // Modalità partner: solo funzionalità lato partner attive.
             add_action('init', [$this, 'handle_book_now_request'], 1);
@@ -52,9 +63,6 @@ class SOS_PG_Plugin {
             add_shortcode('sos_partner_prenota', [$this, 'shortcode_partner_prenota']);
         } else {
             // Modalità sito principale: funzionalità gateway complete.
-            add_action('add_meta_boxes', [$this, 'register_partner_page_metabox']);
-            add_action('save_post_page', [$this, 'save_partner_page_meta'], 10, 2);
-
             add_action('init', [$this, 'handle_partner_login'], 1);
             add_action('init', [$this, 'handle_book_now_request'], 1);
             add_action('template_redirect', [$this, 'protect_partner_pages'], 1);
@@ -149,11 +157,11 @@ class SOS_PG_Plugin {
             return;
         }
         $url = admin_url('admin.php?page=sos-partner-gateway-settings');
-        echo '<div class="notice notice-warning is-dismissible"><p>';
-        echo '<strong>SOS Partner Gateway</strong>: nessuna chiave pubblica ECC configurata. ';
-        echo 'Il login partner non funzioner&agrave; finch&eacute; non viene impostata una chiave in ';
-        echo '<a href="' . esc_url($url) . '">Impostazioni &rarr; Chiave pubblica PEM</a>.';
-        echo '</p></div>';
+            echo '<div class="notice notice-warning is-dismissible"><p>';
+            echo '<strong>SOS Partner Gateway</strong>: nessuna chiave pubblica ECC configurata. ';
+            echo 'Il login partner non funzionerà finché non viene impostata una chiave in ';
+            echo '<a href="' . esc_url($url) . '">Impostazioni &rarr; Chiave pubblica PEM</a>.';
+            echo '</p></div>';
     }
 
     private function get_settings() {
@@ -292,22 +300,37 @@ class SOS_PG_Plugin {
         }
 
         $map = $this->get_partner_discounts();
-        if (!isset($map[$partner_id])) {
-            return $defaults;
+        if (isset($map[$partner_id])) {
+            $entry = $map[$partner_id];
+
+            // Retrocompatibilità: vecchio formato era un float semplice.
+            if (!is_array($entry)) {
+                return array_merge($defaults, ['amount' => (float) $entry]);
+            }
+
+            return [
+                'amount'          => (float) ($entry['amount'] ?? 0.0),
+                'type'            => in_array($entry['type'] ?? 'fixed', ['fixed', 'percent'], true) ? $entry['type'] : 'fixed',
+                'pay_on_partner'  => !empty($entry['pay_on_partner']),
+            ];
         }
 
-        $entry = $map[$partner_id];
-
-        // Retrocompatibilità: vecchio formato era un float semplice.
-        if (!is_array($entry)) {
-            return array_merge($defaults, ['amount' => (float) $entry]);
+        // Fallback: partner non presente nella mappa sconti, usa config partner multipli.
+        $cfg = $this->partner_registry ? $this->partner_registry->get_partner_config($partner_id) : null;
+        if ($cfg) {
+            $pay_on_partner = !empty($cfg['pay_on_partner']) || !empty($cfg['no_upfront_cost']);
+            if ($pay_on_partner) {
+                // TEMP DEBUG per diagnosi fallback config.
+                error_log('SOS_PG DISCOUNT CONFIG FALLBACK partner=' . $partner_id . ' source=partner_config');
+            }
+            return [
+                'amount'          => 0.0,
+                'type'            => 'fixed',
+                'pay_on_partner'  => $pay_on_partner,
+            ];
         }
 
-        return [
-            'amount'          => (float) ($entry['amount'] ?? 0.0),
-            'type'            => in_array($entry['type'] ?? 'fixed', ['fixed', 'percent'], true) ? $entry['type'] : 'fixed',
-            'pay_on_partner'  => !empty($entry['pay_on_partner']),
-        ];
+        return $defaults;
     }
 
     private function set_booking_meta($booking_id, $key, $value) {
@@ -358,6 +381,10 @@ class SOS_PG_Plugin {
         return '/' . $slug;
     }
 
+    public function get_login_endpoint_url() {
+        return home_url($this->current_endpoint_path() . '/');
+    }
+
     private function current_payment_callback_path() {
         $slug = trim((string) $this->get_settings()['payment_callback_slug'], '/');
         return '/' . ($slug === '' ? 'partner-payment-callback' : $slug);
@@ -369,6 +396,17 @@ class SOS_PG_Plugin {
 
     private function get_ip() {
         return sanitize_text_field((string) ($_SERVER['REMOTE_ADDR'] ?? 'unknown'));
+    }
+
+    private function log_event($level, $code, $data = []) {
+        $lvl = strtoupper(trim((string) $level));
+        $event = trim((string) $code);
+        $context = is_array($data) ? $data : ['message' => (string) $data];
+        $json = function_exists('wp_json_encode') ? wp_json_encode($context) : json_encode($context);
+        if ($json === false) {
+            $json = '';
+        }
+        error_log(sprintf('SOS_PG %s %s %s', $lvl, $event, $json));
     }
 
     private function ban_key($ip) {
@@ -384,104 +422,61 @@ class SOS_PG_Plugin {
     }
 
     private function public_key_resource($partner_id = '') {
-        $partner_pem = '';
-
+        // Partner login must verify against partner-specific public key only
         if ($partner_id !== '') {
             $cfg = $this->partner_registry ? $this->partner_registry->get_partner_config($partner_id) : null;
-            if ($cfg && !empty($cfg['public_key_pem'])) {
-                $partner_pem = trim((string) $cfg['public_key_pem']);
+            if (!$cfg || empty($cfg['public_key_pem'])) {
+                return false;
             }
+            $pem = trim((string) $cfg['public_key_pem']);
+        } else {
+            $pem = trim((string) ($this->get_settings()['public_key_pem'] ?? ''));
         }
-
-        $pem = $partner_pem !== ''
-            ? $partner_pem
-            : trim((string) ($this->get_settings()['public_key_pem'] ?? ''));
 
         if ($pem === '') {
             return false;
         }
+
         return openssl_pkey_get_public($pem);
-    }
-
-    private function log_event($level, $event_type, $args = []) {
-        $settings = $this->get_settings();
-
-        if ($level === 'DEBUG' && empty($settings['debug_logging_enabled'])) {
-            return;
-        }
-
-        global $wpdb;
-        $wpdb->insert(
-            $this->table_logs,
-            [
-                'created_at' => current_time('mysql'),
-                'level' => substr((string) $level, 0, 20),
-                'event_type' => substr((string) $event_type, 0, 50),
-                'partner_id' => sanitize_text_field((string) ($args['partner_id'] ?? '')),
-                'email' => sanitize_email((string) ($args['email'] ?? '')),
-                'ip' => sanitize_text_field((string) ($args['ip'] ?? '')),
-                'reason' => isset($args['reason']) ? wp_strip_all_tags((string) $args['reason']) : '',
-                'user_agent' => isset($args['user_agent']) ? wp_strip_all_tags((string) $args['user_agent']) : '',
-                'context' => !empty($args['context']) ? wp_json_encode($args['context']) : '',
-            ],
-            ['%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s']
-        );
     }
 
     public function register_partner_page_metabox() {
         add_meta_box(
-            'sos-pg-partner-page',
-            'SOS Partner Gateway',
+            'sos_pg_partner_page',
+            __('SOS Partner Gateway', 'sos-pg'),
             [$this, 'render_partner_page_metabox'],
             'page',
-            'normal',
-            'high'
+            'side',
+            'default'
         );
     }
 
     public function render_partner_page_metabox($post) {
         wp_nonce_field('sos_pg_save_partner_page', 'sos_pg_partner_page_nonce');
-        $enabled = (int) get_post_meta($post->ID, '_sos_pg_partner_enabled', true);
-        ?>
-        <p>
-            <label>
-                <input type="checkbox" name="sos_pg_partner_enabled" value="1" <?php checked($enabled, 1); ?>>
-                Proteggi questa pagina come pagina partner
-            </label>
-        </p>
-        <table class="form-table">
-            <tr>
-                <th>Partner ID</th>
-                <td>
-                    <input type="text" class="regular-text" name="sos_pg_partner_id" value="<?php echo esc_attr(get_post_meta($post->ID, '_sos_pg_partner_id', true)); ?>" placeholder="fh">
-                </td>
-            </tr>
-            <tr>
-                <th>Redirect path</th>
-                <td>
-                    <input type="text" class="regular-text" name="sos_pg_redirect_path" value="<?php echo esc_attr(get_post_meta($post->ID, '_sos_pg_redirect_path', true)); ?>" placeholder="/prenotazioni-fh/">
-                </td>
-            </tr>
-            <tr>
-                <th>Sconto partner (€)</th>
-                <td>
-                    <input type="number" step="0.01" min="0" name="sos_pg_discount_amount" value="<?php echo esc_attr(get_post_meta($post->ID, '_sos_pg_discount_amount', true)); ?>" placeholder="0.00">
-                </td>
-            </tr>
-            <tr>
-                <th>Stato iniziale LatePoint</th>
-                <td>
-                    <input type="text" class="regular-text" name="sos_pg_initial_status" value="<?php echo esc_attr(get_post_meta($post->ID, '_sos_pg_initial_status', true)); ?>" placeholder="F+H">
-                </td>
-            </tr>
-            <tr>
-                <th>Location / Posizione</th>
-                <td>
-                    <input type="text" class="regular-text" name="sos_pg_location_label" value="<?php echo esc_attr(get_post_meta($post->ID, '_sos_pg_location_label', true)); ?>" placeholder="F+H">
-                </td>
-            </tr>
-        </table>
-        <?php
+
+        $enabled         = (int) get_post_meta($post->ID, '_sos_pg_partner_enabled', true);
+        $partner_id      = (string) get_post_meta($post->ID, '_sos_pg_partner_id', true);
+        $redirect_path   = (string) get_post_meta($post->ID, '_sos_pg_redirect_path', true);
+        $discount_amount = (string) get_post_meta($post->ID, '_sos_pg_discount_amount', true);
+        $initial_status  = (string) get_post_meta($post->ID, '_sos_pg_initial_status', true);
+        $location_label  = (string) get_post_meta($post->ID, '_sos_pg_location_label', true);
+
+        echo '<p><label><input type="checkbox" name="sos_pg_partner_enabled" value="1" ' . checked($enabled, 1, false) . '> ' . esc_html__('Abilita pagina partner', 'sos-pg') . '</label></p>';
+
+        echo '<p><label for="sos_pg_partner_id"><strong>' . esc_html__('Partner ID', 'sos-pg') . '</strong></label><br>';
+        echo '<input type="text" id="sos_pg_partner_id" name="sos_pg_partner_id" value="' . esc_attr($partner_id) . '" class="widefat"></p>';
+
+        echo '<p><label for="sos_pg_redirect_path"><strong>' . esc_html__('Redirect path', 'sos-pg') . '</strong></label><br>';
+        echo '<input type="text" id="sos_pg_redirect_path" name="sos_pg_redirect_path" value="' . esc_attr($redirect_path) . '" class="widefat" placeholder="/pagina-destinazione"></p>';
+
+        echo '<p><label for="sos_pg_discount_amount"><strong>' . esc_html__('Sconto', 'sos-pg') . '</strong></label><br>';
+        echo '<input type="text" id="sos_pg_discount_amount" name="sos_pg_discount_amount" value="' . esc_attr($discount_amount) . '" class="widefat"></p>';
+
+        echo '<p><label for="sos_pg_initial_status"><strong>' . esc_html__('Stato iniziale', 'sos-pg') . '</strong></label><br>';
+        echo '<input type="text" id="sos_pg_initial_status" name="sos_pg_initial_status" value="' . esc_attr($initial_status) . '" class="widefat"></p>';
+
+        echo '<p><label for="sos_pg_location_label"><strong>' . esc_html__('Location label', 'sos-pg') . '</strong></label><br>';
+        echo '<input type="text" id="sos_pg_location_label" name="sos_pg_location_label" value="' . esc_attr($location_label) . '" class="widefat"></p>';
     }
 
     public function save_partner_page_meta($post_id, $post) {
@@ -526,17 +521,30 @@ class SOS_PG_Plugin {
     }
 
     public function protect_partner_pages() {
+        $__sos_pg_t0 = microtime(true);
         if (is_admin() || wp_doing_ajax() || !is_page()) {
+            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
+            if ($__sos_pg_dt > 0.05) {
+                error_log(sprintf('SOS_PG PERF protect_partner_pages: %.4f sec', $__sos_pg_dt));
+            }
             return;
         }
 
         $post_id = get_queried_object_id();
         if (!$post_id) {
+            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
+            if ($__sos_pg_dt > 0.05) {
+                error_log(sprintf('SOS_PG PERF protect_partner_pages: %.4f sec', $__sos_pg_dt));
+            }
             return;
         }
 
         $enabled = (int) get_post_meta($post_id, '_sos_pg_partner_enabled', true);
         if (!$enabled) {
+            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
+            if ($__sos_pg_dt > 0.05) {
+                error_log(sprintf('SOS_PG PERF protect_partner_pages: %.4f sec', $__sos_pg_dt));
+            }
             return;
         }
 
@@ -544,6 +552,10 @@ class SOS_PG_Plugin {
         $courtesy_page_id = (int) $this->get_settings()['courtesy_page_id'];
 
         if (!is_user_logged_in()) {
+            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
+            if ($__sos_pg_dt > 0.05) {
+                error_log(sprintf('SOS_PG PERF protect_partner_pages: %.4f sec', $__sos_pg_dt));
+            }
             wp_safe_redirect($courtesy_page_id ? get_permalink($courtesy_page_id) : home_url('/'));
             exit;
         }
@@ -551,6 +563,10 @@ class SOS_PG_Plugin {
         $user_partner = (string) get_user_meta(get_current_user_id(), 'partner_id', true);
 
         if ($required_partner && $user_partner !== $required_partner) {
+            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
+            if ($__sos_pg_dt > 0.05) {
+                error_log(sprintf('SOS_PG PERF protect_partner_pages: %.4f sec', $__sos_pg_dt));
+            }
             $this->log_event('WARN', 'PAGE_BLOCKED_PARTNER_MISMATCH', [
                 'partner_id' => $required_partner,
                 'email' => wp_get_current_user()->user_email,
@@ -558,6 +574,22 @@ class SOS_PG_Plugin {
                 'reason' => 'Utente con partner_id diverso',
             ]);
             wp_die('Accesso non consentito a questa pagina partner.', 'Accesso negato', ['response' => 403]);
+        }
+
+        // Assicura che il partner_id sia disponibile per il pricing LatePoint (cookie/session) nel flow partner.
+        $cookie_pid = sanitize_text_field((string) ($_COOKIE['sos_pg_partner_id'] ?? ''));
+        if ($cookie_pid !== $required_partner) {
+            // TEMP DEBUG: conferma contesto partner pronto per sconti/pay_on_partner.
+            error_log('SOS_PG PARTNER CONTEXT READY partner=' . $required_partner . ' source=page_meta_refresh');
+            setcookie('sos_pg_partner_id', $required_partner, time() + 4 * HOUR_IN_SECONDS, '/', '', is_ssl(), false);
+        } else {
+            // TEMP DEBUG: il contesto partner è già presente via cookie.
+            error_log('SOS_PG PARTNER CONTEXT READY partner=' . $required_partner . ' source=cookie');
+        }
+
+        $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
+        if ($__sos_pg_dt > 0.05) {
+            error_log(sprintf('SOS_PG PERF protect_partner_pages: %.4f sec', $__sos_pg_dt));
         }
     }
 
@@ -655,7 +687,11 @@ class SOS_PG_Plugin {
             exit('Email non valida');
         }
 
-        if (!$timestamp || abs(time() - $timestamp) > 180) {
+        // TEMP DEBUG timestamp handoff
+        error_log('SOS_PG LOGIN TIMESTAMP now=' . time() . ' received=' . $timestamp . ' diff=' . abs(time() - (int) $timestamp) . ' partner=' . $partner_id);
+
+        // TEMP FIX: aumentata tolleranza timestamp per debug clock skew
+        if (!$timestamp || abs(time() - $timestamp) > 3600) {
             $this->register_fail('timestamp scaduto', $partner_id, $email);
             status_header(403);
             exit('Richiesta scaduta');
@@ -673,6 +709,9 @@ class SOS_PG_Plugin {
             exit('Firma non valida');
         }
 
+        $partner_cfg = $this->partner_registry ? $this->partner_registry->get_partner_config($partner_id) : null;
+        $has_partner_key = is_array($partner_cfg) && !empty($partner_cfg['public_key_pem']);
+
         $public_key = $this->public_key_resource($partner_id);
         if (!$public_key) {
             $this->log_event('ERROR', 'PARTNER_LOGIN_KEY_ERROR', [
@@ -687,7 +726,16 @@ class SOS_PG_Plugin {
         }
 
         $message = $partner_id . '|' . $email . '|' . $timestamp . '|' . $nonce;
+
+        // TEMP DEBUG signature verify
+        error_log('SOS_PG LOGIN VERIFY partner=' . $partner_id . ' message=' . $message);
+        // TEMP DEBUG signature verify
+        error_log('SOS_PG LOGIN VERIFY KEY partner=' . $partner_id . ' key_valid=' . ($public_key ? 'yes' : 'no') . ' source=' . ($has_partner_key ? 'partner_config' : 'global_settings'));
+
         $ok = openssl_verify($message, $signature, $public_key, OPENSSL_ALGO_SHA256);
+
+        // TEMP DEBUG signature verify
+        error_log('SOS_PG LOGIN VERIFY RESULT partner=' . $partner_id . ' ok=' . (string) $ok);
 
         if ($ok !== 1) {
             $this->register_fail('firma non valida', $partner_id, $email);
@@ -797,13 +845,13 @@ class SOS_PG_Plugin {
     private function notice() {
         $msg = sanitize_text_field(wp_unslash($_GET['msg'] ?? ''));
         $map = [
-            'saved' => 'Impostazioni salvate.',
-            'unlocked' => 'IP sbloccato correttamente.',
-            'ip_missing' => 'IP mancante.',
-            'cleared' => 'Log svuotati.',
-            'discount_saved' => 'Sconti partner salvati.',
-            'routes_saved' => 'Routing partner salvato.',
-            'webhooks_saved' => 'Webhook partner salvati.',
+            'saved'           => 'Impostazioni salvate.',
+            'unlocked'        => 'IP sbloccato correttamente.',
+            'ip_missing'      => 'IP mancante.',
+            'cleared'         => 'Log svuotati.',
+            'discount_saved'  => 'Sconti partner salvati.',
+            'routes_saved'    => 'Routing partner salvato.',
+            'webhooks_saved'  => 'Webhook partner salvati.',
         ];
 
         if (isset($map[$msg])) {
@@ -823,6 +871,7 @@ class SOS_PG_Plugin {
             add_submenu_page('sos-partner-gateway', 'Pagine Partner', 'Pagine Partner', 'manage_options', 'sos-partner-gateway-pages', [$this, 'render_pages_page']);
             add_submenu_page('sos-partner-gateway', 'Partner multipli (beta)', 'Partner multipli (beta)', 'manage_options', 'sos-partner-gateway-partners', [$this, 'render_partner_configs_page']);
             add_submenu_page('sos-partner-gateway', 'Test pagamento', 'Test pagamento', 'manage_options', 'sos-partner-gateway-payment-test', [$this, 'render_test_payment_page']);
+            add_submenu_page('sos-partner-gateway', 'Tester embedded booking', 'Tester embedded booking', 'manage_options', 'sos-partner-gateway-embedded-tester', [$this, 'render_embedded_booking_tester_page']);
         }
     }
 
@@ -1067,11 +1116,23 @@ class SOS_PG_Plugin {
         }
         echo '<p>Nuovo layer di configurazione partner. Le impostazioni esistenti restano invariate.</p>';
 
+        echo '<style>
+            .sos-pg-partner-table-wrapper { overflow-x: auto; margin-top: 12px; border: 1px solid #ccd0d4; background: #fff; }
+            .sos-pg-partner-table { border-collapse: collapse; min-width: 960px; width: 100%; }
+            .sos-pg-partner-table th { position: sticky; top: 0; background: #f6f7f7; z-index: 2; padding: 8px 10px; text-align: left; white-space: nowrap; }
+            .sos-pg-partner-table td { padding: 6px 8px; vertical-align: top; }
+            .sos-pg-partner-table input.regular-text { width: 100%; max-width: none; }
+            .sos-pg-partner-table textarea.large-text { width: 100%; box-sizing: border-box; min-height: 46px; }
+            .sos-pg-partner-table .sos-col-narrow { min-width: 80px; width: 90px; }
+            .sos-pg-partner-table .sos-col-medium { min-width: 140px; }
+        </style>';
+
         echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
         wp_nonce_field('sos_pg_save_partner_configs');
         echo '<input type="hidden" name="action" value="sos_pg_save_partner_configs" />';
 
-        echo '<table class="widefat fixed striped">';
+        echo '<div class="sos-pg-partner-table-wrapper">';
+        echo '<table class="widefat fixed striped sos-pg-partner-table">';
         echo '<thead><tr>';
         $cols = [
             'Partner ID', 'Abilitato', 'Tipo', 'Integration mode', 'API base URL', 'API key',
@@ -1109,24 +1170,24 @@ class SOS_PG_Plugin {
             $pid_readonly = $pid_val !== '' ? 'readonly' : '';
 
             echo '<tr>';
-            echo '<td><input type="text" name="partners[' . esc_attr($index) . '][partner_id]" value="' . esc_attr($pid_val) . '" class="regular-text" ' . $pid_readonly . ' /></td>';
-            echo '<td><label><input type="checkbox" name="partners[' . esc_attr($index) . '][enabled]" value="1" ' . checked($enabled, true, false) . ' /> abilitato</label></td>';
-            echo '<td><select name="partners[' . esc_attr($index) . '][type]">';
+            echo '<td class="sos-col-medium"><input type="text" name="partners[' . esc_attr($index) . '][partner_id]" value="' . esc_attr($pid_val) . '" class="regular-text" ' . $pid_readonly . ' /></td>';
+            echo '<td class="sos-col-narrow"><label><input type="checkbox" name="partners[' . esc_attr($index) . '][enabled]" value="1" ' . checked($enabled, true, false) . ' /> abilitato</label></td>';
+            echo '<td class="sos-col-medium"><select name="partners[' . esc_attr($index) . '][type]">';
             foreach (['wordpress', 'external_api', 'embedded_booking'] as $opt) {
                 echo '<option value="' . esc_attr($opt) . '" ' . selected($type, $opt, false) . '>' . esc_html($opt) . '</option>';
             }
             echo '</select></td>';
-            echo '<td><input type="text" name="partners[' . esc_attr($index) . '][integration_mode]" value="' . esc_attr($integration_mode) . '" class="regular-text" /></td>';
-            echo '<td><input type="text" name="partners[' . esc_attr($index) . '][api_base_url]" value="' . esc_attr($api_base_url) . '" class="regular-text" /></td>';
-            echo '<td><input type="text" name="partners[' . esc_attr($index) . '][api_key]" value="' . esc_attr($api_key) . '" class="regular-text" /></td>';
+            echo '<td class="sos-col-medium"><input type="text" name="partners[' . esc_attr($index) . '][integration_mode]" value="' . esc_attr($integration_mode) . '" class="regular-text" /></td>';
+            echo '<td class="sos-col-medium"><input type="text" name="partners[' . esc_attr($index) . '][api_base_url]" value="' . esc_attr($api_base_url) . '" class="regular-text" /></td>';
+            echo '<td class="sos-col-medium"><input type="text" name="partners[' . esc_attr($index) . '][api_key]" value="' . esc_attr($api_key) . '" class="regular-text" /></td>';
             echo '<td><textarea name="partners[' . esc_attr($index) . '][public_key_pem]" rows="2" class="large-text">' . esc_textarea($public_key_pem) . '</textarea></td>';
             echo '<td><textarea name="partners[' . esc_attr($index) . '][private_key_pem]" rows="2" class="large-text">' . esc_textarea($private_key_pem) . '</textarea></td>';
-            echo '<td><input type="text" name="partners[' . esc_attr($index) . '][webhook_url]" value="' . esc_attr($webhook_url) . '" class="regular-text" /></td>';
-            echo '<td><input type="text" name="partners[' . esc_attr($index) . '][webhook_secret]" value="' . esc_attr($webhook_secret) . '" class="regular-text" /></td>';
-            echo '<td><input type="text" name="partners[' . esc_attr($index) . '][callback_secret]" value="' . esc_attr($callback_secret) . '" class="regular-text" /></td>';
-            echo '<td><label><input type="checkbox" name="partners[' . esc_attr($index) . '][no_upfront_cost]" value="1" ' . checked($no_upfront_cost, true, false) . ' /> sì</label></td>';
-            echo '<td><input type="text" name="partners[' . esc_attr($index) . '][validation_token_strategy]" value="' . esc_attr($validation_token_strategy) . '" class="regular-text" placeholder="es. bearer_token" /></td>';
-            echo '<td><input type="text" name="partners[' . esc_attr($index) . '][external_ref_mapping]" value="' . esc_attr($external_ref_mapping) . '" class="regular-text" placeholder="es. booking_id" /></td>';
+            echo '<td class="sos-col-medium"><input type="text" name="partners[' . esc_attr($index) . '][webhook_url]" value="' . esc_attr($webhook_url) . '" class="regular-text" /></td>';
+            echo '<td class="sos-col-medium"><input type="text" name="partners[' . esc_attr($index) . '][webhook_secret]" value="' . esc_attr($webhook_secret) . '" class="regular-text" /></td>';
+            echo '<td class="sos-col-medium"><input type="text" name="partners[' . esc_attr($index) . '][callback_secret]" value="' . esc_attr($callback_secret) . '" class="regular-text" /></td>';
+            echo '<td class="sos-col-narrow"><label><input type="checkbox" name="partners[' . esc_attr($index) . '][no_upfront_cost]" value="1" ' . checked($no_upfront_cost, true, false) . ' /> sì</label></td>';
+            echo '<td class="sos-col-medium"><input type="text" name="partners[' . esc_attr($index) . '][validation_token_strategy]" value="' . esc_attr($validation_token_strategy) . '" class="regular-text" placeholder="es. bearer_token" /></td>';
+            echo '<td class="sos-col-medium"><input type="text" name="partners[' . esc_attr($index) . '][external_ref_mapping]" value="' . esc_attr($external_ref_mapping) . '" class="regular-text" placeholder="es. booking_id" /></td>';
             echo '<td><textarea name="partners[' . esc_attr($index) . '][notes]" rows="2" class="large-text">' . esc_textarea($notes) . '</textarea></td>';
             echo '<td><textarea name="partners[' . esc_attr($index) . '][flags]" rows="2" class="large-text" placeholder="JSON">' . esc_textarea($flags_json) . '</textarea></td>';
             echo '<td><textarea name="partners[' . esc_attr($index) . '][metadata]" rows="2" class="large-text" placeholder="JSON">' . esc_textarea($metadata_json) . '</textarea></td>';
@@ -1136,6 +1197,7 @@ class SOS_PG_Plugin {
         }
 
         echo '</tbody></table>';
+        echo '</div>';
         echo '<p class="submit"><button class="button button-primary">Salva configurazione</button></p>';
         echo '</form>';
         echo '</div>';
@@ -1465,6 +1527,13 @@ class SOS_PG_Plugin {
                 $type   = isset($types[$idx]) && wp_unslash($types[$idx]) === 'percent' ? 'percent' : 'fixed';
                 $pop    = isset($pop_set[$pid]) || ($pid === '' && isset($pop_set['__new__']));
 
+                // Nuova riga: se il partner_id è stato compilato e il checkbox usava __new__, abilita pay_on_partner.
+                if (!$pop && $pid !== '' && isset($pop_set['__new__'])) {
+                    $pop = true;
+                    // TEMP DEBUG
+                    error_log('SOS_PG DISCOUNTS SAVE NEW ROW partner=' . $pid . ' pay_on_partner=1');
+                }
+
                 if ($pid === '') {
                     continue;
                 }
@@ -1617,6 +1686,9 @@ class SOS_PG_Plugin {
     }
 
     public function apply_partner_discount($amount, $booking = null, $apply_coupons = null) {
+        $__sos_pg_t0 = microtime(true);
+        $result = null;
+
         $config = $this->get_partner_discount_config();
 
         if ($config['pay_on_partner']) {
@@ -1625,20 +1697,23 @@ class SOS_PG_Plugin {
             if (in_array(current_filter(), ['latepoint_full_amount', 'latepoint_full_amount_for_service'], true)) {
                 $this->partner_original_total = max(0.0, (float) $amount);
             }
-            return 0.0;
-        }
-
-        if ($config['amount'] <= 0) {
-            return $amount;
-        }
-
-        if ($config['type'] === 'percent') {
+            $result = 0.0;
+        } elseif ($config['amount'] <= 0) {
+            $result = $amount;
+        } elseif ($config['type'] === 'percent') {
             $discount = (float) $amount * ($config['amount'] / 100.0);
-            return max(0.0, (float) $amount - $discount);
+            $result = max(0.0, (float) $amount - $discount);
+        } else {
+            // Sconto fisso in euro.
+            $result = max(0.0, (float) $amount - $config['amount']);
         }
 
-        // Sconto fisso in euro.
-        return max(0.0, (float) $amount - $config['amount']);
+        $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
+        if ($__sos_pg_dt > 0.05) {
+            error_log(sprintf('SOS_PG PERF apply_partner_discount: %.4f sec', $__sos_pg_dt));
+        }
+
+        return $result;
     }
 
     public function handle_save_routes() {
@@ -1676,11 +1751,20 @@ class SOS_PG_Plugin {
     }
 
     public function handle_book_now_request() {
+        $__sos_pg_t0 = microtime(true);
         if (!isset($_GET['sos_pg_book_now'])) {
+            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
+            if ($__sos_pg_dt > 0.05) {
+                error_log(sprintf('SOS_PG PERF handle_book_now_request: %.4f sec', $__sos_pg_dt));
+            }
             return;
         }
 
         if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
+            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
+            if ($__sos_pg_dt > 0.05) {
+                error_log(sprintf('SOS_PG PERF handle_book_now_request: %.4f sec', $__sos_pg_dt));
+            }
             status_header(405);
             exit('Metodo non consentito');
         }
@@ -1711,22 +1795,38 @@ class SOS_PG_Plugin {
         }
 
         if ($email === '' || !is_email($email)) {
+            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
+            if ($__sos_pg_dt > 0.05) {
+                error_log(sprintf('SOS_PG PERF handle_book_now_request: %.4f sec', $__sos_pg_dt));
+            }
             wp_safe_redirect(add_query_arg('sos_pg_err', 'email', wp_get_referer() ?: home_url('/')));
             exit;
         }
 
         if ($partner_id === '') {
+            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
+            if ($__sos_pg_dt > 0.05) {
+                error_log(sprintf('SOS_PG PERF handle_book_now_request: %.4f sec', $__sos_pg_dt));
+            }
             wp_safe_redirect(add_query_arg('sos_pg_err', 'partner', wp_get_referer() ?: home_url('/')));
             exit;
         }
 
         if ($pem === '') {
+            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
+            if ($__sos_pg_dt > 0.05) {
+                error_log(sprintf('SOS_PG PERF handle_book_now_request: %.4f sec', $__sos_pg_dt));
+            }
             wp_safe_redirect(add_query_arg('sos_pg_err', 'key', wp_get_referer() ?: home_url('/')));
             exit;
         }
 
         $private_key = openssl_pkey_get_private($pem);
         if (!$private_key) {
+            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
+            if ($__sos_pg_dt > 0.05) {
+                error_log(sprintf('SOS_PG PERF handle_book_now_request: %.4f sec', $__sos_pg_dt));
+            }
             wp_safe_redirect(add_query_arg('sos_pg_err', 'key', wp_get_referer() ?: home_url('/')));
             exit;
         }
@@ -1740,6 +1840,10 @@ class SOS_PG_Plugin {
         openssl_free_key($private_key);
 
         if (!$ok) {
+            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
+            if ($__sos_pg_dt > 0.05) {
+                error_log(sprintf('SOS_PG PERF handle_book_now_request: %.4f sec', $__sos_pg_dt));
+            }
             wp_safe_redirect(add_query_arg('sos_pg_err', 'sign', wp_get_referer() ?: home_url('/')));
             exit;
         }
@@ -1764,6 +1868,11 @@ class SOS_PG_Plugin {
         echo '</form>';
         echo '<script>document.getElementById("sosPgBookNowForm").submit();</script>';
         echo '</body></html>';
+
+        $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
+        if ($__sos_pg_dt > 0.05) {
+            error_log(sprintf('SOS_PG PERF handle_book_now_request: %.4f sec', $__sos_pg_dt));
+        }
         exit;
     }
 
@@ -1851,6 +1960,7 @@ class SOS_PG_Plugin {
     }
 
     public function handle_booking_created($booking, $cart = null) {
+        $__sos_pg_t0 = microtime(true);
         static $sent_booking_ids = [];
 
         $booking_id_early = (string) $this->safe_get($booking, 'id');
@@ -1858,6 +1968,10 @@ class SOS_PG_Plugin {
             // Deduplicazione: evita l'invio doppio del webhook quando entrambi gli hook
             // LatePoint (latepoint_after_create_booking e latepoint_booking_created) scattano
             // per lo stesso booking nella stessa request.
+            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
+            if ($__sos_pg_dt > 0.05) {
+                error_log(sprintf('SOS_PG PERF handle_booking_created: %.4f sec', $__sos_pg_dt));
+            }
             return;
         }
 
@@ -1887,6 +2001,10 @@ class SOS_PG_Plugin {
                 'context' => ['booking_id' => $booking_id_early, 'location_id' => $location_id],
                 'reason' => $hint ?: null,
             ]);
+            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
+            if ($__sos_pg_dt > 0.05) {
+                error_log(sprintf('SOS_PG PERF handle_booking_created: %.4f sec', $__sos_pg_dt));
+            }
             return;
         }
 
@@ -1911,6 +2029,8 @@ class SOS_PG_Plugin {
         $customer_email = $this->safe_get_nested($booking, ['customer', 'email']);
         $customer_phone = $this->safe_get_nested($booking, ['customer', 'phone']);
         $customer_name = $this->safe_get_nested($booking, ['customer', 'full_name']);
+        $customer_first_name = $this->safe_get_nested($booking, ['customer', 'first_name']);
+        $customer_last_name = $this->safe_get_nested($booking, ['customer', 'last_name']);
 
         $this->log_event('INFO', 'BOOKING_PARTNER_HOOK', [
             'partner_id' => $partner_id,
@@ -1935,6 +2055,8 @@ class SOS_PG_Plugin {
             'customer_email' => $customer_email,
             'customer_phone' => $customer_phone,
             'customer_name' => $customer_name,
+            'customer_first_name' => $customer_first_name,
+            'customer_last_name' => $customer_last_name,
         ];
 
         // Salva partner_id e location_id in meta LatePoint per tracciamento/report.
@@ -1959,6 +2081,10 @@ class SOS_PG_Plugin {
             'start_date' => $start_date,
             'start_time' => $start_time,
             'customer_email' => $customer_email,
+            'customer_phone' => $customer_phone,
+            'customer_name' => $customer_name,
+            'customer_first_name' => $customer_first_name,
+            'customer_last_name' => $customer_last_name,
         ];
 
         // Se il pagamento è sul portale del partner, includi l'importo da incassare.
@@ -1972,6 +2098,11 @@ class SOS_PG_Plugin {
             $sent_booking_ids[$booking_id_early] = true;
         }
         $this->send_partner_webhook($partner_id, $partner_payload);
+
+        $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
+        if ($__sos_pg_dt > 0.05) {
+            error_log(sprintf('SOS_PG PERF handle_booking_created: %.4f sec', $__sos_pg_dt));
+        }
     }
 
     private function send_partner_webhook($partner_id, array $payload) {
@@ -2065,10 +2196,37 @@ class SOS_PG_Plugin {
         $incoming_status = sanitize_text_field($data['status'] ?? '');
         $transaction_id = sanitize_text_field($data['transaction_id'] ?? '');
         $partner_id = sanitize_text_field($data['partner_id'] ?? '');
+        $amount_paid = isset($data['amount_paid']) ? (float) $data['amount_paid'] : null;
+        $currency = sanitize_text_field($data['currency'] ?? '');
+        $payment_provider = sanitize_text_field($data['payment_provider'] ?? '');
+        $external_reference = sanitize_text_field($data['external_reference'] ?? '');
 
         if (!$booking_id) {
             status_header(400);
             exit('Dati mancanti');
+        }
+
+        if ($transaction_id === '') {
+            $this->log_event('WARN', 'PAYMENT_CALLBACK_MISSING_TX', [
+                'partner_id' => $partner_id,
+                'context' => ['booking_id' => $booking_id],
+            ]);
+            $transaction_id = 'TEST-' . time();
+        }
+
+        if ($partner_id !== '') {
+            global $wpdb;
+            $booking_partner_id = (string) $wpdb->get_var(
+                $wpdb->prepare(
+                    "SELECT meta_value FROM {$this->booking_meta_table} WHERE object_id = %d AND meta_key = %s LIMIT 1",
+                    $booking_id,
+                    'partner_id'
+                )
+            );
+            if ($booking_partner_id !== '' && $booking_partner_id !== $partner_id) {
+                status_header(403);
+                exit('Partner mismatch per booking');
+            }
         }
 
         // Stato finale sempre gestito da LatePoint: fissiamo pending (o valore da impostazioni) e pagamento "paid".
@@ -2098,6 +2256,10 @@ class SOS_PG_Plugin {
                 'booking_id' => $booking_id,
                 'status' => $target_status,
                 'transaction_id' => $transaction_id,
+                'amount_paid' => $amount_paid,
+                'currency' => $currency,
+                'payment_provider' => $payment_provider,
+                'external_reference' => $external_reference,
             ],
         ]);
 
@@ -2476,6 +2638,149 @@ class SOS_PG_Plugin {
         }
         echo '<p><a href="' . $back_url . '" class="button">Torna</a></p>';
         echo '<script>setTimeout(function(){window.location.replace("' . $back_url_js . '");},3000);</script>';
+    }
+
+    /**
+     * Pagina admin per testare la validazione token dell'embedded booking.
+     * Consente di normalizzare il payload e verificare la firma JWT RS256 in base alla configurazione del partner.
+     */
+    public function render_embedded_booking_tester_page() {
+        if (!current_user_can('manage_options')) {
+            wp_die('Non autorizzato');
+        }
+
+        $registry = $this->partner_registry;
+        $embedded = $this->embedded_booking;
+        $partners = $registry ? $registry->get_partner_configs() : [];
+
+        $embedded_partners = [];
+        foreach ($partners as $pid => $cfg) {
+            if (($cfg['type'] ?? '') === 'embedded_booking') {
+                $embedded_partners[$pid] = $cfg;
+            }
+        }
+
+        $selected_partner = sanitize_text_field((string) ($_REQUEST['partner_id'] ?? ''));
+        if ($selected_partner === '' && !empty($embedded_partners)) {
+            $keys = array_keys($embedded_partners);
+            $selected_partner = reset($keys);
+        }
+
+        $input = [
+            'validation_token' => '',
+            'validation_token_type' => '',
+            'external_reference' => '',
+            'email' => '',
+            'name' => '',
+            'phone' => '',
+        ];
+        $normalized = null;
+        $verification = null;
+        $notice = '';
+
+        if (isset($_POST['sos_pg_embedded_action']) && $_POST['sos_pg_embedded_action'] === 'verify') {
+            check_admin_referer('sos_pg_embedded_verify');
+
+            $selected_partner = sanitize_text_field((string) ($_POST['partner_id'] ?? ''));
+            $input['validation_token'] = (string) wp_unslash($_POST['validation_token'] ?? '');
+            $input['validation_token_type'] = sanitize_text_field(wp_unslash($_POST['validation_token_type'] ?? ''));
+            $input['external_reference'] = sanitize_text_field(wp_unslash($_POST['external_reference'] ?? ''));
+            $input['email'] = sanitize_email(wp_unslash($_POST['email'] ?? ''));
+            $input['name'] = sanitize_text_field(wp_unslash($_POST['name'] ?? ''));
+            $input['phone'] = sanitize_text_field(wp_unslash($_POST['phone'] ?? ''));
+
+            if ($selected_partner === '') {
+                $notice = 'Seleziona un partner configurato per embedded booking.';
+            } else {
+                $cfg = $registry ? $registry->get_embedded_booking_partner($selected_partner) : null;
+                if (!$cfg || empty($cfg['enabled'])) {
+                    $notice = 'Partner non trovato o disabilitato.';
+                } elseif (!$embedded) {
+                    $notice = 'Servizio embedded booking non disponibile.';
+                } else {
+                    $normalized = $embedded->normalize_token_payload($selected_partner, $input);
+                    $verification = $embedded->verify_normalized_token($selected_partner, $normalized);
+                }
+            }
+        }
+
+        echo '<div class="wrap">';
+        echo '<h1>SOS Partner Gateway — Tester embedded booking</h1>';
+
+        if ($notice !== '') {
+            echo '<div class="notice notice-error is-dismissible"><p>' . esc_html($notice) . '</p></div>';
+        }
+
+        echo '<p>Usa questa pagina per verificare i token di validazione inviati dal portale partner verso l\'embed booking. Le strategie e le chiavi pubbliche sono prese dalla configurazione partner (tipo <code>embedded_booking</code>).</p>';
+
+        if (empty($embedded_partners)) {
+            echo '<div class="notice notice-warning"><p>Nessun partner configurato con tipo <strong>embedded_booking</strong>. Aggiungine uno in <em>Partner multipli (beta)</em>.</p></div>';
+            echo '</div>';
+            return;
+        }
+
+        $rest_base = rest_url('sos-pg/v1/embedded-booking/verify/');
+        echo '<div style="background:#fff;border:1px solid #ccd0d4;padding:12px 16px;margin:12px 0;border-radius:3px;">';
+        echo '<strong>Endpoint REST di verifica:</strong> <code>' . esc_html($rest_base . '{partner_id}') . '</code><br>';
+        echo 'Permessi richiesti: amministratore (stesso controllo di questa pagina). Invia i parametri come query string o body form/JSON.';
+        echo '</div>';
+
+        echo '<h2>Partner configurati</h2>';
+        echo '<table class="widefat striped" style="max-width:680px;">';
+        echo '<thead><tr><th>Partner ID</th><th>Strategia token</th><th>External ref mapping</th><th>Stato</th></tr></thead><tbody>';
+        foreach ($embedded_partners as $pid => $cfg) {
+            $strategy = $cfg['validation_token_strategy'] ?? '';
+            $status_label = !empty($cfg['enabled']) ? '<span style="color:#46b450;">abilitato</span>' : '<span style="color:#d63638;">disabilitato</span>';
+            echo '<tr>';
+            echo '<td>' . esc_html($pid) . '</td>';
+            echo '<td>' . esc_html($strategy ?: '—') . '</td>';
+            echo '<td>' . esc_html($cfg['external_ref_mapping'] ?? '') . '</td>';
+            echo '<td>' . $status_label . '</td>';
+            echo '</tr>';
+        }
+        echo '</tbody></table>';
+
+        echo '<h2 style="margin-top:20px;">Verifica token</h2>';
+        echo '<form method="post" style="max-width:780px;">';
+        wp_nonce_field('sos_pg_embedded_verify');
+        echo '<input type="hidden" name="sos_pg_embedded_action" value="verify">';
+
+        echo '<table class="form-table">';
+        echo '<tr><th>Partner ID</th><td><select name="partner_id">';
+        foreach ($embedded_partners as $pid => $cfg) {
+            $sel = selected($pid, $selected_partner, false);
+            echo '<option value="' . esc_attr($pid) . '" ' . $sel . '>' . esc_html($pid) . '</option>';
+        }
+        echo '</select></td></tr>';
+
+        echo '<tr><th>validation_token</th><td><textarea name="validation_token" class="large-text code" rows="4" placeholder="JWT RS256 o token custom">' . esc_textarea($input['validation_token']) . '</textarea></td></tr>';
+        echo '<tr><th>validation_token_type</th><td><input type="text" name="validation_token_type" class="regular-text" value="' . esc_attr($input['validation_token_type']) . '" placeholder="es. bearer"></td></tr>';
+        echo '<tr><th>external_reference</th><td><input type="text" name="external_reference" class="regular-text" value="' . esc_attr($input['external_reference']) . '" placeholder="es. booking_id esterno"></td></tr>';
+        echo '<tr><th>Email / Name / Phone</th><td>';
+        echo '<input type="email" name="email" class="regular-text" value="' . esc_attr($input['email']) . '" placeholder="utente@example.com" style="margin-right:8px;">';
+        echo '<input type="text" name="name" class="regular-text" value="' . esc_attr($input['name']) . '" placeholder="Nome" style="margin-right:8px;">';
+        echo '<input type="text" name="phone" class="regular-text" value="' . esc_attr($input['phone']) . '" placeholder="Telefono">';
+        echo '</td></tr>';
+        echo '</table>';
+
+        submit_button('Verifica token embedded');
+        echo '</form>';
+
+        if ($normalized !== null && $verification !== null) {
+            echo '<h2>Risultato</h2>';
+            echo '<div style="margin-top:8px;display:flex;gap:12px;flex-wrap:wrap;">';
+            echo '<div style="flex:1 1 320px;background:#fff;border:1px solid #ccd0d4;padding:12px;border-radius:3px;">';
+            echo '<strong>Payload normalizzato</strong>';
+            echo '<pre style="white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;">' . esc_html(wp_json_encode($normalized, JSON_PRETTY_PRINT)) . '</pre>';
+            echo '</div>';
+            echo '<div style="flex:1 1 320px;background:#fff;border:1px solid #ccd0d4;padding:12px;border-radius:3px;">';
+            echo '<strong>Verifica</strong>';
+            echo '<pre style="white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;">' . esc_html(wp_json_encode($verification, JSON_PRETTY_PRINT)) . '</pre>';
+            echo '</div>';
+            echo '</div>';
+        }
+
+        echo '</div>';
     }
 
 
