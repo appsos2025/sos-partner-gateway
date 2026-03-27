@@ -940,14 +940,20 @@ class SOS_PG_Plugin {
         exit;
     }
 
-    private function get_logs($limit = 300) {
+    private function get_logs($limit = 300, $offset = 0) {
         global $wpdb;
         return $wpdb->get_results(
             $wpdb->prepare(
-                "SELECT * FROM {$this->table_logs} ORDER BY id DESC LIMIT %d",
-                max(1, min(1000, (int) $limit))
+                "SELECT * FROM {$this->table_logs} ORDER BY id DESC LIMIT %d OFFSET %d",
+                max(1, min(1000, (int) $limit)),
+                max(0, (int) $offset)
             )
         );
+    }
+
+    private function get_logs_count() {
+        global $wpdb;
+        return (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$this->table_logs}" );
     }
 
     private function get_partner_pages() {
@@ -995,19 +1001,60 @@ class SOS_PG_Plugin {
         }
     }
 
+    private function event_badge($event_type) {
+        $code = strtoupper((string) $event_type);
+        if (preg_match('/OK|SENT|SUMMARY/', $code)) {
+            $color = '#1b5e20'; $bg = '#e8f5e9';
+        } elseif (preg_match('/FAIL|INVALID|MISMATCH/', $code)) {
+            $color = '#b71c1c'; $bg = '#ffebee';
+        } elseif (preg_match('/WARN|RECEIVED|SKIP/', $code)) {
+            $color = '#e65100'; $bg = '#fff3e0';
+        } else {
+            $color = '#37474f'; $bg = '#f5f5f5';
+        }
+        return '<span style="display:inline-block;padding:2px 7px;border-radius:3px;font-size:11px;font-weight:600;letter-spacing:.3px;color:'
+            . $color . ';background:' . $bg . ';border:1px solid ' . $color . '33;">'
+            . esc_html($event_type) . '</span>';
+    }
+
+    private function render_pagination($view, $page_num, $total_pages) {
+        $base = ['page' => 'sos-partner-gateway', 'view' => $view];
+        echo '<div style="margin:10px 0;display:flex;align-items:center;gap:12px;">';
+        if ($page_num > 1) {
+            $prev = add_query_arg(array_merge($base, ['page_num' => $page_num - 1]), admin_url('admin.php'));
+            echo '<a class="button" href="' . esc_url($prev) . '">&laquo; Prev</a>';
+        }
+        echo '<span>Pagina ' . (int) $page_num . ' / ' . (int) $total_pages . '</span>';
+        if ($page_num < $total_pages) {
+            $next = add_query_arg(array_merge($base, ['page_num' => $page_num + 1]), admin_url('admin.php'));
+            echo '<a class="button" href="' . esc_url($next) . '">Next &raquo;</a>';
+        }
+        echo '</div>';
+    }
+
     public function render_logs_page() {
         if (!current_user_can('manage_options')) {
             wp_die('Non autorizzato');
         }
 
-        $logs = $this->get_logs();
-        $settings = $this->get_settings();
-        $view = sanitize_key((string) ($_GET['view'] ?? 'raw'));
+        $settings    = $this->get_settings();
+        $view        = sanitize_key((string) ($_GET['view'] ?? 'raw'));
         if (!in_array($view, ['raw', 'summary'], true)) {
             $view = 'raw';
         }
-        $raw_url = add_query_arg(['page' => 'sos-partner-gateway', 'view' => 'raw'], admin_url('admin.php'));
+        $per_page    = 50;
+        $page_num    = max(1, (int) ($_GET['page_num'] ?? 1));
+        $raw_url     = add_query_arg(['page' => 'sos-partner-gateway', 'view' => 'raw'],     admin_url('admin.php'));
         $summary_url = add_query_arg(['page' => 'sos-partner-gateway', 'view' => 'summary'], admin_url('admin.php'));
+        if ($view === 'raw') {
+            $total_rows  = $this->get_logs_count();
+            $total_pages = max(1, (int) ceil($total_rows / $per_page));
+            $page_num    = min($page_num, $total_pages);
+            $logs        = $this->get_logs($per_page, ($page_num - 1) * $per_page);
+        } else {
+            // Summary: load broader set for grouping, paginate groups in PHP
+            $logs        = $this->get_logs(2000, 0);
+        }
 
         echo '<div class="wrap"><h1>SOS Partner Gateway — Log</h1>';
         $this->notice();
@@ -1107,6 +1154,12 @@ class SOS_PG_Plugin {
                 return strcmp((string) $b['last_date'], (string) $a['last_date']);
             });
 
+            $total_groups = count($groups);
+            $total_pages  = max(1, (int) ceil($total_groups / $per_page));
+            $page_num     = min($page_num, $total_pages);
+            $groups       = array_slice($groups, ($page_num - 1) * $per_page, $per_page);
+
+            $this->render_pagination($view, $page_num, $total_pages);
             echo '<table class="widefat striped"><thead><tr><th>Ultima data</th><th>Partner</th><th>Email</th><th>Group / Booking</th><th>Count</th><th>Primo evento</th><th>Ultimo evento</th><th>Stato finale</th><th>Ultimo motivo</th><th>Dettagli</th></tr></thead><tbody>';
             if (empty($groups)) {
                 echo '<tr><td colspan="10">Nessun log.</td></tr>';
@@ -1119,8 +1172,8 @@ class SOS_PG_Plugin {
                 echo '<td>' . esc_html($g['email']) . '</td>';
                 echo '<td>' . esc_html($g['group']) . '</td>';
                 echo '<td>' . esc_html((string) $g['count']) . '</td>';
-                echo '<td>' . esc_html($g['first_event']) . '</td>';
-                echo '<td>' . esc_html($g['last_event']) . '</td>';
+                echo '<td>' . $this->event_badge($g['first_event']) . '</td>';
+                echo '<td>' . $this->event_badge($g['last_event']) . '</td>';
                 echo '<td>' . esc_html($g['final_status']) . '</td>';
                 echo '<td>' . esc_html($g['last_reason']) . '</td>';
                 echo '<td>';
@@ -1137,10 +1190,13 @@ class SOS_PG_Plugin {
                 echo '</tr>';
             }
 
-            echo '</tbody></table></div>';
+            echo '</tbody></table>';
+            $this->render_pagination($view, $page_num, $total_pages);
+            echo '</div>';
             return;
         }
 
+        $this->render_pagination($view, $page_num, $total_pages);
         echo '<table class="widefat striped"><thead><tr><th>Data</th><th>Evento</th><th>Partner</th><th>Email</th><th>IP</th><th>Group</th><th>Motivo</th><th>Context</th><th>Azione</th></tr></thead><tbody>';
 
         if (!$logs) {
@@ -1182,7 +1238,7 @@ class SOS_PG_Plugin {
 
             echo '<tr>';
             echo '<td>' . esc_html($log->created_at) . '</td>';
-            echo '<td>' . esc_html($log->event_type) . '</td>';
+            echo '<td>' . $this->event_badge($log->event_type) . '</td>';
             echo '<td>' . esc_html($log->partner_id) . '</td>';
             echo '<td>' . esc_html($log->email) . '</td>';
             echo '<td>' . esc_html($log->ip) . '</td>';
@@ -1211,7 +1267,9 @@ class SOS_PG_Plugin {
             echo '</tr>';
         }
 
-        echo '</tbody></table></div>';
+        echo '</tbody></table>';
+        $this->render_pagination($view, $page_num, $total_pages);
+        echo '</div>';
     }
 
     public function render_settings_page() {
