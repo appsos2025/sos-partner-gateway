@@ -273,24 +273,50 @@ class SOS_PG_REST_Router {
 
     public function handle_embedded_booking_create(WP_REST_Request $request) {
         $partner_id = sanitize_text_field((string) $request->get_param('partner_id'));
+        $email_param = sanitize_email((string) $request->get_param('email'));
+        $log_embedded_fail = function($reason, $error_code, $validation_errors = []) use ($partner_id, $email_param) {
+            $payload = [
+                'reason' => (string) $reason,
+                'context' => [
+                    'error_code' => (string) $error_code,
+                ],
+            ];
+
+            if ($partner_id !== '') {
+                $payload['partner_id'] = $partner_id;
+            }
+            if ($email_param !== '') {
+                $payload['email'] = $email_param;
+            }
+            if (!empty($validation_errors)) {
+                $payload['context']['validation_errors'] = $validation_errors;
+            }
+
+            $this->plugin->log_public_event('WARN', 'EMBEDDED_CREATE_FAIL', $payload);
+        };
+
         if ($partner_id === '') {
+            $log_embedded_fail('Partner non valido', 'sos_pg_invalid_partner');
             return new WP_Error('sos_pg_invalid_partner', 'Partner non valido', ['status' => 404]);
         }
 
         $registry = $this->plugin->get_partner_registry();
         $cfg = $registry ? $registry->get_embedded_booking_partner($partner_id) : null;
         if (!$cfg || ($cfg['enabled'] ?? false) === false || ($cfg['type'] ?? '') !== 'embedded_booking') {
+            $log_embedded_fail('Partner non configurato per embedded booking', 'sos_pg_partner_not_embedded');
             return new WP_Error('sos_pg_partner_not_embedded', 'Partner non configurato per embedded booking', ['status' => 404]);
         }
 
         $embedded = $this->plugin->get_embedded_booking_service();
         if (!$embedded) {
+            $log_embedded_fail('Servizio non disponibile', 'sos_pg_service_unavailable');
             return new WP_Error('sos_pg_service_unavailable', 'Servizio non disponibile', ['status' => 500]);
         }
 
         $normalized = $embedded->normalize_token_payload($partner_id, $request);
         $verification = $embedded->verify_normalized_token($partner_id, $normalized);
         if (!$verification['ok']) {
+            $log_embedded_fail('Token non valido', 'sos_pg_token_invalid', $verification['errors'] ?? []);
             return new WP_Error('sos_pg_token_invalid', 'Token non valido', [
                 'status' => 401,
                 'errors' => $verification['errors'],
@@ -300,6 +326,7 @@ class SOS_PG_REST_Router {
 
         $identity = $embedded->validate_identity_payload($request);
         if (!$identity['ok']) {
+            $log_embedded_fail('Dati utente non validi', 'sos_pg_identity_invalid', $identity['errors'] ?? []);
             return new WP_Error('sos_pg_identity_invalid', 'Dati utente non validi', [
                 'status' => 400,
                 'errors' => $identity['errors'],
@@ -315,11 +342,13 @@ class SOS_PG_REST_Router {
         $cfg_full = $registry ? $registry->get_partner_config($partner_id) : null;
         $pem = $cfg_full && !empty($cfg_full['private_key_pem']) ? trim((string) $cfg_full['private_key_pem']) : '';
         if ($pem === '') {
+            $log_embedded_fail('Chiave privata partner mancante', 'sos_pg_partner_key_missing');
             return new WP_Error('sos_pg_partner_key_missing', 'Chiave privata partner mancante', ['status' => 500]);
         }
 
         $private_key = openssl_pkey_get_private($pem);
         if (!$private_key) {
+            $log_embedded_fail('Chiave privata partner non valida', 'sos_pg_partner_key_invalid');
             return new WP_Error('sos_pg_partner_key_invalid', 'Chiave privata partner non valida', ['status' => 500]);
         }
 
@@ -328,6 +357,7 @@ class SOS_PG_REST_Router {
         openssl_free_key($private_key);
 
         if (!$ok) {
+            $log_embedded_fail('Impossibile firmare il payload', 'sos_pg_partner_sign_fail');
             return new WP_Error('sos_pg_partner_sign_fail', 'Impossibile firmare il payload', ['status' => 500]);
         }
 
@@ -350,6 +380,21 @@ class SOS_PG_REST_Router {
             'identity' => $identity['identity'],
             'booking_created' => false,
         ];
+
+        $ok_payload = [
+            'partner_id' => $partner_id,
+            'email' => $email,
+            'context' => [
+                'redirect_url' => $redirect_url,
+            ],
+        ];
+        if (!empty($verification['strategy'])) {
+            $ok_payload['token_strategy'] = (string) $verification['strategy'];
+        }
+        if (!empty($normalized['external_reference'])) {
+            $ok_payload['external_reference'] = (string) $normalized['external_reference'];
+        }
+        $this->plugin->log_public_event('INFO', 'EMBEDDED_CREATE_OK', $ok_payload);
 
         return new WP_REST_Response($response);
     }

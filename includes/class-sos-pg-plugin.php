@@ -213,6 +213,10 @@ class SOS_PG_Plugin {
         return $this->handoff_token;
     }
 
+    public function log_public_event($level, $code, $data = []) {
+        $this->log_event($level, $code, $data);
+    }
+
     public function get_health_payload() {
         if (!function_exists('get_plugin_data')) {
             require_once ABSPATH . 'wp-admin/includes/plugin.php';
@@ -398,15 +402,131 @@ class SOS_PG_Plugin {
         return sanitize_text_field((string) ($_SERVER['REMOTE_ADDR'] ?? 'unknown'));
     }
 
+    private function is_debug_logging_enabled() {
+        $settings = $this->get_settings();
+        return !empty($settings['debug_logging_enabled']);
+    }
+
     private function log_event($level, $code, $data = []) {
         $lvl = strtoupper(trim((string) $level));
         $event = trim((string) $code);
-        $context = is_array($data) ? $data : ['message' => (string) $data];
-        $json = function_exists('wp_json_encode') ? wp_json_encode($context) : json_encode($context);
-        if ($json === false) {
-            $json = '';
+        $payload = is_array($data) ? $data : ['message' => (string) $data];
+
+        // Il flag debug governa solo eventi rumorosi/di sviluppo.
+        $debug_only_events = [
+            'BOOKING_WEBHOOK_SKIP_NO_PARTNER',
+            'WEBHOOK_PARTNER_SKIP_NO_URL',
+        ];
+        $is_noisy = ($lvl === 'DEBUG'
+            || strpos($event, 'DEBUG') !== false
+            || strpos($event, 'PERF') !== false
+            || in_array($event, $debug_only_events, true));
+        if ($is_noisy && !$this->is_debug_logging_enabled()) {
+            return;
         }
-        error_log(sprintf('SOS_PG %s %s %s', $lvl, $event, $json));
+
+        $partner_id = isset($payload['partner_id']) && is_scalar($payload['partner_id'])
+            ? sanitize_text_field((string) $payload['partner_id'])
+            : '';
+        $email = isset($payload['email']) && is_scalar($payload['email'])
+            ? sanitize_email((string) $payload['email'])
+            : '';
+        $ip = isset($payload['ip']) && is_scalar($payload['ip'])
+            ? sanitize_text_field((string) $payload['ip'])
+            : '';
+        $reason = isset($payload['reason']) && is_scalar($payload['reason'])
+            ? sanitize_text_field((string) $payload['reason'])
+            : '';
+        $user_agent = isset($payload['user_agent']) && is_scalar($payload['user_agent'])
+            ? sanitize_text_field((string) $payload['user_agent'])
+            : '';
+
+        $context_payload = [];
+        if (array_key_exists('context', $payload)) {
+            $raw_context = $payload['context'];
+            if (is_array($raw_context)) {
+                $context_payload = $raw_context;
+            } elseif (is_scalar($raw_context) || is_null($raw_context)) {
+                $context_payload = ['value' => $raw_context];
+            } else {
+                $context_payload = ['value' => (string) wp_json_encode($raw_context)];
+            }
+        }
+
+        if (!array_key_exists('request_id', $context_payload)) {
+            $context_payload['request_id'] = function_exists('wp_generate_uuid4')
+                ? wp_generate_uuid4()
+                : uniqid('', true);
+        }
+        if (!array_key_exists('source', $context_payload)) {
+            $context_payload['source'] = 'plugin';
+        }
+        if (!array_key_exists('timestamp_unix', $context_payload)) {
+            $context_payload['timestamp_unix'] = time();
+        }
+        if (!array_key_exists('url', $context_payload)) {
+            $context_payload['url'] = sanitize_text_field((string) ($_SERVER['REQUEST_URI'] ?? ''));
+        }
+        if (!array_key_exists('method', $context_payload)) {
+            $context_payload['method'] = sanitize_text_field((string) ($_SERVER['REQUEST_METHOD'] ?? ''));
+        }
+        if (!array_key_exists('group_key', $context_payload)) {
+            $booking_id_for_group = '';
+            if (array_key_exists('booking_id', $context_payload) && is_scalar($context_payload['booking_id'])) {
+                $booking_id_for_group = trim((string) $context_payload['booking_id']);
+            } elseif (isset($payload['booking_id']) && is_scalar($payload['booking_id'])) {
+                $booking_id_for_group = trim((string) $payload['booking_id']);
+            }
+
+            if ($booking_id_for_group !== '') {
+                $context_payload['group_key'] = 'booking_' . $booking_id_for_group;
+            } elseif ($email !== '') {
+                $context_payload['group_key'] = 'user_' . md5(strtolower($email));
+            }
+        }
+
+        $unmapped = $payload;
+        unset($unmapped['partner_id'], $unmapped['email'], $unmapped['ip'], $unmapped['reason'], $unmapped['user_agent'], $unmapped['context']);
+        if (!empty($unmapped)) {
+            $context_payload['_unmapped'] = $unmapped;
+        }
+
+        $json = function_exists('wp_json_encode') ? wp_json_encode($context_payload) : json_encode($context_payload);
+        if ($json === false) {
+            $json = '{}';
+        }
+
+        $insert_ok = false;
+        if (!empty($this->table_logs)) {
+            global $wpdb;
+            if (isset($wpdb) && is_object($wpdb)) {
+                $insert_ok = (false !== $wpdb->insert(
+                    $this->table_logs,
+                    [
+                        'created_at' => current_time('mysql'),
+                        'level' => $lvl,
+                        'event_type' => $event,
+                        'partner_id' => $partner_id,
+                        'email' => $email,
+                        'ip' => $ip,
+                        'reason' => $reason,
+                        'user_agent' => $user_agent,
+                        'context' => $json,
+                    ],
+                    ['%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s']
+                ));
+            }
+        }
+
+        $critical_info_events = ['PARTNER_LOGIN_OK', 'PAYMENT_CALLBACK_OK'];
+        $is_critical = in_array($lvl, ['WARN', 'ERROR', 'CRITICAL', 'ALERT', 'EMERGENCY'], true)
+            || in_array($event, $critical_info_events, true)
+            || strpos($event, 'FAIL') !== false;
+
+        // Manteniamo error_log per eventi critici e sempre come fallback DB.
+        if ($is_critical || !$insert_ok || $this->is_debug_logging_enabled()) {
+            error_log(sprintf('SOS_PG %s %s %s', $lvl, $event, $json));
+        }
     }
 
     private function ban_key($ip) {
@@ -882,30 +1002,200 @@ class SOS_PG_Plugin {
 
         $logs = $this->get_logs();
         $settings = $this->get_settings();
+        $view = sanitize_key((string) ($_GET['view'] ?? 'raw'));
+        if (!in_array($view, ['raw', 'summary'], true)) {
+            $view = 'raw';
+        }
+        $raw_url = add_query_arg(['page' => 'sos-partner-gateway', 'view' => 'raw'], admin_url('admin.php'));
+        $summary_url = add_query_arg(['page' => 'sos-partner-gateway', 'view' => 'summary'], admin_url('admin.php'));
 
         echo '<div class="wrap"><h1>SOS Partner Gateway — Log</h1>';
         $this->notice();
         echo '<p><strong>Endpoint:</strong> <code>' . esc_html(home_url($this->current_endpoint_path() . '/')) . '</code></p>';
         echo '<p><strong>Debug logs:</strong> ' . (!empty($settings['debug_logging_enabled']) ? 'attivi' : 'disattivati') . '</p>';
+        echo '<p><a class="button ' . ($view === 'raw' ? 'button-primary' : '') . '" href="' . esc_url($raw_url) . '">Raw</a> ';
+        echo '<a class="button ' . ($view === 'summary' ? 'button-primary' : '') . '" href="' . esc_url($summary_url) . '">Riepilogo</a></p>';
         echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '" style="margin:16px 0;">';
         wp_nonce_field('sos_pg_clear_logs');
         echo '<input type="hidden" name="action" value="sos_pg_clear_logs"><button class="button">Svuota log</button></form>';
 
-        echo '<table class="widefat striped"><thead><tr><th>Data</th><th>Evento</th><th>Partner</th><th>Email</th><th>IP</th><th>Motivo</th><th>Context</th><th>Azione</th></tr></thead><tbody>';
+        if ($view === 'summary') {
+            $groups = [];
+
+            foreach ((array) $logs as $log) {
+                $context_raw = (string) $log->context;
+                $context_data = json_decode($context_raw, true);
+                $email_norm = strtolower(trim((string) $log->email));
+                $group_key = '';
+
+                if (is_array($context_data) && !empty($context_data['group_key']) && is_scalar($context_data['group_key'])) {
+                    $candidate = (string) $context_data['group_key'];
+                    if (strpos($candidate, 'booking_') === 0) {
+                        $group_key = $candidate;
+                    }
+                }
+                if ($group_key === '' && $email_norm !== '') {
+                    $group_key = 'email:' . $email_norm;
+                }
+                if ($group_key === '') {
+                    $group_key = 'fallback:' . (string) $log->event_type . '|' . (string) $log->partner_id;
+                }
+
+                if (!isset($groups[$group_key])) {
+                    $groups[$group_key] = [
+                        'last_date' => (string) $log->created_at,
+                        'partner_id' => (string) $log->partner_id,
+                        'email' => (string) $log->email,
+                        'group' => $group_key,
+                        'count' => 0,
+                        'first_event' => (string) $log->event_type,
+                        'last_event' => (string) $log->event_type,
+                        'final_status' => '',
+                        'last_reason' => '',
+                        'events' => [],
+                    ];
+                }
+
+                $g = &$groups[$group_key];
+                $g['count']++;
+                $g['events'][] = [
+                    'created_at' => (string) $log->created_at,
+                    'event_type' => (string) $log->event_type,
+                    'reason' => (string) $log->reason,
+                ];
+
+                if ((string) $log->created_at >= $g['last_date']) {
+                    $g['last_date'] = (string) $log->created_at;
+                    $g['last_event'] = (string) $log->event_type;
+                    if ((string) $log->partner_id !== '') {
+                        $g['partner_id'] = (string) $log->partner_id;
+                    }
+                    if ((string) $log->email !== '') {
+                        $g['email'] = (string) $log->email;
+                    }
+                    if (is_array($context_data)) {
+                        if (isset($context_data['final_status']) && is_scalar($context_data['final_status'])) {
+                            $g['final_status'] = (string) $context_data['final_status'];
+                        } elseif (isset($context_data['status']) && is_scalar($context_data['status'])) {
+                            $g['final_status'] = (string) $context_data['status'];
+                        }
+                    }
+                    if ((string) $log->reason !== '') {
+                        $g['last_reason'] = (string) $log->reason;
+                    }
+                }
+
+                if ((string) $log->created_at <= ($g['first_date'] ?? (string) $log->created_at)) {
+                    $g['first_date'] = (string) $log->created_at;
+                    $g['first_event'] = (string) $log->event_type;
+                }
+
+                if ($g['final_status'] === '' && is_array($context_data)) {
+                    if (isset($context_data['final_status']) && is_scalar($context_data['final_status'])) {
+                        $g['final_status'] = (string) $context_data['final_status'];
+                    } elseif (isset($context_data['status']) && is_scalar($context_data['status'])) {
+                        $g['final_status'] = (string) $context_data['status'];
+                    }
+                }
+                if ($g['last_reason'] === '' && (string) $log->reason !== '') {
+                    $g['last_reason'] = (string) $log->reason;
+                }
+                unset($g);
+            }
+
+            usort($groups, function($a, $b) {
+                return strcmp((string) $b['last_date'], (string) $a['last_date']);
+            });
+
+            echo '<table class="widefat striped"><thead><tr><th>Ultima data</th><th>Partner</th><th>Email</th><th>Group / Booking</th><th>Count</th><th>Primo evento</th><th>Ultimo evento</th><th>Stato finale</th><th>Ultimo motivo</th><th>Dettagli</th></tr></thead><tbody>';
+            if (empty($groups)) {
+                echo '<tr><td colspan="10">Nessun log.</td></tr>';
+            }
+
+            foreach ($groups as $g) {
+                echo '<tr>';
+                echo '<td>' . esc_html($g['last_date']) . '</td>';
+                echo '<td>' . esc_html($g['partner_id']) . '</td>';
+                echo '<td>' . esc_html($g['email']) . '</td>';
+                echo '<td>' . esc_html($g['group']) . '</td>';
+                echo '<td>' . esc_html((string) $g['count']) . '</td>';
+                echo '<td>' . esc_html($g['first_event']) . '</td>';
+                echo '<td>' . esc_html($g['last_event']) . '</td>';
+                echo '<td>' . esc_html($g['final_status']) . '</td>';
+                echo '<td>' . esc_html($g['last_reason']) . '</td>';
+                echo '<td>';
+                echo '<details><summary>Eventi gruppo</summary><ul style="margin:8px 0 0 16px;">';
+                foreach ((array) $g['events'] as $ev) {
+                    $line = (string) $ev['created_at'] . ' | ' . (string) $ev['event_type'];
+                    if ((string) $ev['reason'] !== '') {
+                        $line .= ' | ' . (string) $ev['reason'];
+                    }
+                    echo '<li>' . esc_html($line) . '</li>';
+                }
+                echo '</ul></details>';
+                echo '</td>';
+                echo '</tr>';
+            }
+
+            echo '</tbody></table></div>';
+            return;
+        }
+
+        echo '<table class="widefat striped"><thead><tr><th>Data</th><th>Evento</th><th>Partner</th><th>Email</th><th>IP</th><th>Group</th><th>Motivo</th><th>Context</th><th>Azione</th></tr></thead><tbody>';
 
         if (!$logs) {
-            echo '<tr><td colspan="8">Nessun log.</td></tr>';
+            echo '<tr><td colspan="9">Nessun log.</td></tr>';
         }
 
         foreach ((array) $logs as $log) {
+            $context_raw = (string) $log->context;
+            $context_data = json_decode($context_raw, true);
+            $compact_keys = ['booking_id', 'group_key', 'status', 'transaction_id', 'external_reference', 'redirect'];
+            $compact_parts = [];
+
+            if (is_array($context_data)) {
+                foreach ($compact_keys as $ck) {
+                    if (!array_key_exists($ck, $context_data)) {
+                        continue;
+                    }
+                    $cv = $context_data[$ck];
+                    if (is_scalar($cv) || is_null($cv)) {
+                        $compact_parts[] = $ck . '=' . (string) $cv;
+                    } else {
+                        $compact_parts[] = $ck . '=' . (string) wp_json_encode($cv);
+                    }
+                }
+            }
+
+            $context_compact = !empty($compact_parts) ? implode(' | ', $compact_parts) : '—';
+            $context_group = (is_array($context_data) && isset($context_data['group_key']) && (is_scalar($context_data['group_key']) || is_null($context_data['group_key'])))
+                ? (string) $context_data['group_key']
+                : '—';
+            if (is_array($context_data)) {
+                $context_full = wp_json_encode($context_data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                if ($context_full === false) {
+                    $context_full = $context_raw;
+                }
+            } else {
+                $context_full = $context_raw;
+            }
+
             echo '<tr>';
             echo '<td>' . esc_html($log->created_at) . '</td>';
             echo '<td>' . esc_html($log->event_type) . '</td>';
             echo '<td>' . esc_html($log->partner_id) . '</td>';
             echo '<td>' . esc_html($log->email) . '</td>';
             echo '<td>' . esc_html($log->ip) . '</td>';
+            echo '<td>' . esc_html($context_group) . '</td>';
             echo '<td>' . esc_html($log->reason) . '</td>';
-            echo '<td style="max-width:300px;word-break:break-word;">' . esc_html((string) $log->context) . '</td>';
+            echo '<td style="max-width:360px;word-break:break-word;">';
+            echo '<div>' . esc_html($context_compact) . '</div>';
+            if ($context_full !== '') {
+                echo '<details style="margin-top:4px;"><summary>JSON completo</summary>';
+                echo '<pre style="white-space:pre-wrap;margin:6px 0 0;">' . esc_html($context_full) . '</pre>';
+                echo '</details>';
+            }
+            echo '</td>';
             echo '<td>';
             if (!empty($log->ip)) {
                 echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
@@ -2185,13 +2475,6 @@ class SOS_PG_Plugin {
             exit('Payload non valido');
         }
 
-        $sig = $_SERVER['HTTP_X_SOSPG_SIGNATURE'] ?? '';
-        $calc = hash_hmac('sha256', (string) $raw, (string) $secret);
-        if (!$sig || !hash_equals($calc, $sig)) {
-            status_header(401);
-            exit('Firma non valida');
-        }
-
         $booking_id = absint($data['booking_id'] ?? 0);
         $incoming_status = sanitize_text_field($data['status'] ?? '');
         $transaction_id = sanitize_text_field($data['transaction_id'] ?? '');
@@ -2200,6 +2483,41 @@ class SOS_PG_Plugin {
         $currency = sanitize_text_field($data['currency'] ?? '');
         $payment_provider = sanitize_text_field($data['payment_provider'] ?? '');
         $external_reference = sanitize_text_field($data['external_reference'] ?? '');
+        $email = sanitize_email((string) ($data['email'] ?? ''));
+
+        $this->log_event('INFO', 'PAYMENT_CALLBACK_RECEIVED', [
+            'partner_id' => $partner_id,
+            'reason' => '',
+            'context' => [
+                'booking_id' => $booking_id,
+                'transaction_id' => $transaction_id,
+                'amount_paid' => $amount_paid,
+                'currency' => $currency,
+                'payment_provider' => $payment_provider,
+                'external_reference' => $external_reference,
+            ],
+        ]);
+
+        $sig = $_SERVER['HTTP_X_SOSPG_SIGNATURE'] ?? '';
+        $calc = hash_hmac('sha256', (string) $raw, (string) $secret);
+        if (!$sig || !hash_equals($calc, $sig)) {
+            $invalid_hmac_payload = [
+                'reason' => 'invalid_hmac',
+                'context' => [],
+            ];
+            if ($partner_id !== '') {
+                $invalid_hmac_payload['partner_id'] = $partner_id;
+            }
+            if ($booking_id > 0) {
+                $invalid_hmac_payload['context']['booking_id'] = $booking_id;
+            }
+            if ($transaction_id !== '') {
+                $invalid_hmac_payload['context']['transaction_id'] = $transaction_id;
+            }
+            $this->log_event('WARN', 'PAYMENT_CALLBACK_INVALID_HMAC', $invalid_hmac_payload);
+            status_header(401);
+            exit('Firma non valida');
+        }
 
         if (!$booking_id) {
             status_header(400);
@@ -2262,6 +2580,23 @@ class SOS_PG_Plugin {
                 'external_reference' => $external_reference,
             ],
         ]);
+
+        $summary_payload = [
+            'partner_id' => $partner_id,
+            'context' => [
+                'booking_id' => $booking_id,
+                'transaction_id' => $transaction_id,
+                'amount_paid' => $amount_paid,
+                'currency' => $currency,
+                'payment_provider' => $payment_provider,
+                'external_reference' => $external_reference,
+                'final_status' => $target_status,
+            ],
+        ];
+        if ($email !== '') {
+            $summary_payload['email'] = $email;
+        }
+        $this->log_event('INFO', 'PARTNER_FLOW_SUMMARY', $summary_payload);
 
         wp_send_json_success(['ok' => true]);
     }
