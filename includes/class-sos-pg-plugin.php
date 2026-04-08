@@ -1762,6 +1762,13 @@ class SOS_PG_Plugin {
                 'partner_id' => $partner_id,
                 'context' => ['booking_id' => $payload['booking_id'] ?? null],
             ]);
+                $this->log_event('ERROR', 'WEBHOOK_BOOKING_ERROR', [
+                    'partner_id' => $partner_id,
+                    'reason' => 'missing_webhook_url',
+                    'context' => [
+                        'booking_id' => $payload['booking_id'] ?? null,
+                    ],
+                ]);
             return;
         }
 
@@ -1773,6 +1780,15 @@ class SOS_PG_Plugin {
         if ($secret !== '') {
             $headers['X-SOSPG-Signature'] = hash_hmac('sha256', (string) $body, (string) $secret);
         }
+
+            $this->log_event('INFO', 'WEBHOOK_BOOKING_SENT', [
+                'partner_id' => $partner_id,
+                'context' => [
+                    'booking_id' => $payload['booking_id'] ?? null,
+                    'url' => $url,
+                    'payload' => $payload,
+                ],
+            ]);
 
         $resp = wp_remote_post($url, [
             'headers' => $headers,
@@ -1786,10 +1802,30 @@ class SOS_PG_Plugin {
                 'reason' => $resp->get_error_message(),
                 'context' => $payload,
             ]);
+                $this->log_event('ERROR', 'WEBHOOK_BOOKING_ERROR', [
+                    'partner_id' => $partner_id,
+                    'reason' => $resp->get_error_message(),
+                    'context' => [
+                        'booking_id' => $payload['booking_id'] ?? null,
+                        'url' => $url,
+                    ],
+                ]);
             return;
         }
 
         $http_code = wp_remote_retrieve_response_code($resp);
+            $response_body = substr((string) wp_remote_retrieve_body($resp), 0, 1000);
+
+            $this->log_event('INFO', 'WEBHOOK_BOOKING_RESPONSE', [
+                'partner_id' => $partner_id,
+                'context' => [
+                    'booking_id' => $payload['booking_id'] ?? null,
+                    'url' => $url,
+                    'http_code' => $http_code,
+                    'response_body' => $response_body,
+                ],
+            ]);
+
         if ($http_code < 200 || $http_code >= 300) {
             $this->log_event('WARN', 'WEBHOOK_PARTNER_FAIL', [
                 'partner_id' => $partner_id,
@@ -1799,6 +1835,15 @@ class SOS_PG_Plugin {
                     'response_body' => substr((string) wp_remote_retrieve_body($resp), 0, 500),
                 ],
             ]);
+                $this->log_event('ERROR', 'WEBHOOK_BOOKING_ERROR', [
+                    'partner_id' => $partner_id,
+                    'reason' => 'HTTP ' . $http_code,
+                    'context' => [
+                        'booking_id' => $payload['booking_id'] ?? null,
+                        'url' => $url,
+                        'response_body' => $response_body,
+                    ],
+                ]);
             return;
         }
         $this->log_event('INFO', 'WEBHOOK_PARTNER_SENT', [
