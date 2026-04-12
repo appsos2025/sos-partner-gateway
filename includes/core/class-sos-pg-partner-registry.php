@@ -50,20 +50,23 @@ class SOS_PG_Partner_Registry {
         }
 
         $map = $this->settings->get_partner_configs_raw();
-        if (!isset($map[$partner_id]) || !is_array($map[$partner_id])) {
+        $resolved_partner_id = $this->resolve_partner_map_key($map, $partner_id);
+        if ($resolved_partner_id === '' || !isset($map[$resolved_partner_id]) || !is_array($map[$resolved_partner_id])) {
             return null;
         }
 
-        $cfg = $map[$partner_id];
+        $cfg = $map[$resolved_partner_id];
 
-        $cfg['partner_id'] = $partner_id;
+        $cfg['partner_id'] = $resolved_partner_id;
         $cfg['enabled'] = !empty($cfg['enabled']);
         $cfg['type'] = sanitize_text_field((string) ($cfg['type'] ?? 'wordpress'));
         $cfg['integration_mode'] = sanitize_text_field((string) ($cfg['integration_mode'] ?? ''));
+        $cfg['completion_return_url'] = isset($cfg['completion_return_url']) ? esc_url_raw((string) $cfg['completion_return_url']) : '';
         $cfg['api_base_url'] = isset($cfg['api_base_url']) ? esc_url_raw((string) $cfg['api_base_url']) : '';
         $cfg['api_key'] = isset($cfg['api_key']) ? (string) $cfg['api_key'] : '';
         $cfg['public_key_pem'] = isset($cfg['public_key_pem']) ? (string) $cfg['public_key_pem'] : '';
         $cfg['private_key_pem'] = isset($cfg['private_key_pem']) ? (string) $cfg['private_key_pem'] : '';
+        $cfg['private_key_path'] = isset($cfg['private_key_path']) ? (string) $cfg['private_key_path'] : '';
         $cfg['webhook_url'] = isset($cfg['webhook_url']) ? esc_url_raw((string) $cfg['webhook_url']) : '';
         $cfg['webhook_secret'] = isset($cfg['webhook_secret']) ? (string) $cfg['webhook_secret'] : '';
         $cfg['callback_secret'] = isset($cfg['callback_secret']) ? (string) $cfg['callback_secret'] : '';
@@ -74,6 +77,29 @@ class SOS_PG_Partner_Registry {
         $cfg['metadata'] = isset($cfg['metadata']) && is_array($cfg['metadata']) ? $cfg['metadata'] : [];
 
         return $cfg;
+    }
+
+    private function resolve_partner_map_key($map, $partner_id) {
+        if (!is_array($map) || $partner_id === '') {
+            return '';
+        }
+
+        if (isset($map[$partner_id])) {
+            return (string) $partner_id;
+        }
+
+        $partner_id_lower = strtolower((string) $partner_id);
+        foreach ($map as $candidate_partner_id => $candidate_config) {
+            if (!is_array($candidate_config)) {
+                continue;
+            }
+
+            if (strtolower((string) $candidate_partner_id) === $partner_id_lower) {
+                return (string) $candidate_partner_id;
+            }
+        }
+
+        return '';
     }
 
     public function get_partner_configs() {
@@ -157,5 +183,40 @@ class SOS_PG_Partner_Registry {
     public function get_external_reference_mapping($partner_id) {
         $cfg = $this->get_partner_config($partner_id);
         return $cfg ? (string) ($cfg['external_ref_mapping'] ?? '') : '';
+    }
+
+    /**
+     * Returns the public key PEM for a partner (from config).
+     */
+    public function get_partner_public_key(string $partner_id): string {
+        $cfg = $this->get_partner_config($partner_id);
+        return $cfg ? trim((string) ($cfg['public_key_pem'] ?? '')) : '';
+    }
+
+    /**
+     * Returns the private key PEM for a partner.
+     * Primary source: reads from file at private_key_path.
+     * Legacy fallback: private_key_pem stored in DB.
+     */
+    public function get_partner_private_key(string $partner_id): string {
+        $cfg = $this->get_partner_config($partner_id);
+        if (!$cfg) {
+            return '';
+        }
+
+        $path = trim((string) ($cfg['private_key_path'] ?? ''));
+        if ($path !== '') {
+            $real = realpath($path);
+            if ($real !== false && is_file($real) && is_readable($real)) {
+                $content = file_get_contents($real);
+                if ($content !== false) {
+                    return trim($content);
+                }
+            }
+            error_log('SOS_PG: private_key_path configurato ma non leggibile per partner ' . $partner_id . ': ' . $path);
+        }
+
+        // Legacy fallback: PEM stored in DB
+        return trim((string) ($cfg['private_key_pem'] ?? ''));
     }
 }

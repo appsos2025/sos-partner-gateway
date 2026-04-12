@@ -67,9 +67,12 @@ class SOS_PG_Embedded_Booking {
         $payload = $this->extract_validation_token_from_request($request_data);
         $payload['token_strategy'] = $strategy;
 
-        if ($payload['external_reference'] === '' && $external_ref !== '') {
-            $payload['external_reference'] = $external_ref;
-        }
+        error_log('EMBEDDED_NORMALIZED_EXTERNAL_REFERENCE ' . wp_json_encode([
+            'partner_id' => (string) $partner_id,
+            'incoming_external_reference' => (string) ($payload['external_reference'] ?? ''),
+            'mapping_value' => (string) $external_ref,
+            'final_external_reference' => (string) ($payload['external_reference'] ?? ''),
+        ]));
 
         return $payload;
     }

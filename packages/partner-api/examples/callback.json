@@ -1,0 +1,10 @@
+{
+  "booking_id": 1234,
+  "transaction_id": "txn_demo_001",
+  "partner_id": "caf_bari",
+  "amount_paid": 50.0,
+  "currency": "EUR",
+  "payment_provider": "stripe",
+  "external_reference": "pi_demo_001",
+  "email": "cliente@example.com"
+}

@@ -3,7 +3,7 @@
  * Plugin Name: SOS Partner Gateway
  * Description: Gateway partner con login firmato ECC, protezione pagine partner, log integrati, sblocco IP e configurazione centralizzata per WordPress/LatePoint.
  * Version: 1.0.0
- * Author: OpenAI
+ * Author: VB
  */
 
 if (!defined('ABSPATH')) exit;
@@ -11,6 +11,7 @@ if (!defined('ABSPATH')) exit;
 define('SOS_PG_FILE', __FILE__);
 define('SOS_PG_DIR', plugin_dir_path(__FILE__));
 define('SOS_PG_TABLE_LOGS', 'sos_partner_gateway_logs');
+define('SOS_PG_DB_VERSION', '1.1');
 
 require_once SOS_PG_DIR . 'includes/core/class-sos-pg-settings.php';
 require_once SOS_PG_DIR . 'includes/core/class-sos-pg-partner-registry.php';

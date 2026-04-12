@@ -6,11 +6,13 @@ class SOS_PG_Plugin {
     private $table_logs = '';
     private $booking_table = '';
     private $booking_meta_table = '';
+    private $booking_partner_table = '';
     private $settings_key = 'sos_pg_settings';
     private $routes_key = 'sos_pg_partner_routes';
     private $discounts_key = 'sos_pg_partner_discounts';
     private $webhooks_key = 'sos_pg_partner_webhooks';
     private $tester_webhook_key = 'sos_pg_main_last_webhook';
+    private $db_version_key = 'sos_pg_db_version';
     private $partner_original_total = null;
     private $settings_helper;
     private $partner_registry;
@@ -26,10 +28,14 @@ class SOS_PG_Plugin {
     }
 
     private function __construct() {
+        error_log('[SOS SSO] CONSTRUCTOR HARD PATH=' . __FILE__);
+        error_log('[SOS SSO] PLUGIN LOADED HARD CHECK PATH=' . __FILE__);
+
         global $wpdb;
         $this->table_logs = $wpdb->prefix . SOS_PG_TABLE_LOGS;
         $this->booking_table = $wpdb->prefix . 'latepoint_bookings';
         $this->booking_meta_table = $wpdb->prefix . 'latepoint_booking_meta';
+        $this->booking_partner_table = $wpdb->prefix . 'sos_pg_booking_partner';
 
         $this->settings_helper = new SOS_PG_Settings($this->settings_key, $this->routes_key, $this->discounts_key, $this->webhooks_key);
         $this->partner_registry = new SOS_PG_Partner_Registry($this->settings_helper);
@@ -55,6 +61,15 @@ class SOS_PG_Plugin {
             add_action('add_meta_boxes', [$this, 'register_partner_page_metabox']);
             add_action('save_post_page', [$this, 'save_partner_page_meta'], 10, 2);
         }
+
+        // The LatePoint completion monitor and completion endpoints must be available
+        // on the real booking page regardless of site_role.
+        error_log('[SOS SSO] HOOK REGISTER HARD wp_enqueue_scripts -> enqueue_partner_completion_monitor_script PATH=' . __FILE__);
+        error_log('[SOS SSO] HOOK REGISTER HARD init -> handle_partner_completion PATH=' . __FILE__);
+        error_log('[SOS SSO] HOOK REGISTER HARD init -> handle_partner_completion_url_request PATH=' . __FILE__);
+        add_action('init', [$this, 'handle_partner_completion'], 1);
+        add_action('init', [$this, 'handle_partner_completion_url_request'], 1);
+        add_action('wp_enqueue_scripts', [$this, 'enqueue_partner_completion_monitor_script']);
 
         if ($partner_mode) {
             // Modalità partner: solo funzionalità lato partner attive.
@@ -89,34 +104,13 @@ class SOS_PG_Plugin {
             add_action('latepoint_after_create_booking', [$this, 'handle_booking_created'], 20, 2);
             add_action('latepoint_booking_created', [$this, 'handle_booking_created'], 20, 2);
         }
+
+        // Crea/aggiorna le tabelle del plugin anche sugli upgrade (non solo in activate).
+        $this->maybe_upgrade_database();
     }
 
     public function activate() {
-        global $wpdb;
-        $table = $this->table_logs;
-        $charset_collate = $wpdb->get_charset_collate();
-
-        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
-
-        $sql = "CREATE TABLE {$table} (
-            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-            created_at DATETIME NOT NULL,
-            level VARCHAR(20) NOT NULL,
-            event_type VARCHAR(50) NOT NULL,
-            partner_id VARCHAR(191) DEFAULT '' NOT NULL,
-            email VARCHAR(191) DEFAULT '' NOT NULL,
-            ip VARCHAR(64) DEFAULT '' NOT NULL,
-            reason TEXT NULL,
-            user_agent TEXT NULL,
-            context LONGTEXT NULL,
-            PRIMARY KEY (id),
-            KEY event_type (event_type),
-            KEY partner_id (partner_id),
-            KEY email (email),
-            KEY ip (ip)
-        ) {$charset_collate};";
-
-        dbDelta($sql);
+        $this->maybe_upgrade_database();
 
         if (get_option($this->settings_key) === false) {
             add_option($this->settings_key, [
@@ -145,6 +139,61 @@ class SOS_PG_Plugin {
         }
     }
 
+    public function maybe_upgrade_database() {
+        if ((string) get_option($this->db_version_key) === SOS_PG_DB_VERSION) {
+            return;
+        }
+
+        global $wpdb;
+        $charset_collate = $wpdb->get_charset_collate();
+
+        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+
+        $table_logs = $this->table_logs;
+        $sql_logs = "CREATE TABLE {$table_logs} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            created_at DATETIME NOT NULL,
+            level VARCHAR(20) NOT NULL,
+            event_type VARCHAR(50) NOT NULL,
+            partner_id VARCHAR(191) DEFAULT '' NOT NULL,
+            email VARCHAR(191) DEFAULT '' NOT NULL,
+            ip VARCHAR(64) DEFAULT '' NOT NULL,
+            reason TEXT NULL,
+            user_agent TEXT NULL,
+            context LONGTEXT NULL,
+            PRIMARY KEY (id),
+            KEY event_type (event_type),
+            KEY partner_id (partner_id),
+            KEY email (email),
+            KEY ip (ip)
+        ) {$charset_collate};";
+
+        dbDelta($sql_logs);
+
+        $bp_table = $this->booking_partner_table;
+        $sql_bp = "CREATE TABLE {$bp_table} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            lp_booking_id BIGINT UNSIGNED NOT NULL,
+            partner_id VARCHAR(64) NOT NULL,
+            location_id VARCHAR(64) NOT NULL DEFAULT '',
+            payment_transaction_id VARCHAR(191) NOT NULL DEFAULT '',
+            payment_external_ref VARCHAR(191) NOT NULL DEFAULT '',
+            payment_status VARCHAR(20) NOT NULL DEFAULT '',
+            partner_charge DECIMAL(10,4) DEFAULT NULL,
+            confirmed_at DATETIME DEFAULT NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            PRIMARY KEY (id),
+            UNIQUE KEY uq_lp_booking_id (lp_booking_id),
+            KEY partner_id (partner_id),
+            KEY payment_transaction_id (payment_transaction_id)
+        ) {$charset_collate};";
+
+        dbDelta($sql_bp);
+
+        update_option($this->db_version_key, SOS_PG_DB_VERSION);
+    }
+
     public function admin_notice_missing_key() {
         if (!current_user_can('manage_options')) {
             return;
@@ -165,6 +214,7 @@ class SOS_PG_Plugin {
     }
 
     private function get_settings() {
+
         $defaults = [
             'site_role' => 'main',
             'endpoint_slug' => 'partner-login',
@@ -194,7 +244,8 @@ class SOS_PG_Plugin {
             $settings = [];
         }
 
-        return wp_parse_args($settings, $defaults);
+        $result = wp_parse_args($settings, $defaults);
+        return $result;
     }
 
     private function is_partner_mode() {
@@ -237,6 +288,7 @@ class SOS_PG_Plugin {
     }
 
     private function get_partner_routes() {
+
         $routes = get_option($this->routes_key, []);
         if (!is_array($routes)) {
             return [];
@@ -262,13 +314,17 @@ class SOS_PG_Plugin {
     }
 
     private function get_partner_discounts() {
+
         $map = get_option($this->discounts_key, []);
-        return is_array($map) ? $map : [];
+        $result = is_array($map) ? $map : [];
+        return $result;
     }
 
     private function get_partner_webhooks() {
+
         $map = get_option($this->webhooks_key, []);
-        return is_array($map) ? $map : [];
+        $result = is_array($map) ? $map : [];
+        return $result;
     }
 
     /**
@@ -323,10 +379,6 @@ class SOS_PG_Plugin {
         $cfg = $this->partner_registry ? $this->partner_registry->get_partner_config($partner_id) : null;
         if ($cfg) {
             $pay_on_partner = !empty($cfg['pay_on_partner']) || !empty($cfg['no_upfront_cost']);
-            if ($pay_on_partner) {
-                // TEMP DEBUG per diagnosi fallback config.
-                error_log('SOS_PG DISCOUNT CONFIG FALLBACK partner=' . $partner_id . ' source=partner_config');
-            }
             return [
                 'amount'          => 0.0,
                 'type'            => 'fixed',
@@ -337,24 +389,302 @@ class SOS_PG_Plugin {
         return $defaults;
     }
 
-    private function set_booking_meta($booking_id, $key, $value) {
-        if (!$booking_id || !$key) {
-            return;
+    private function upsert_partner_booking_record(array $data): bool {
+        if (empty($data['lp_booking_id']) || empty($data['partner_id'])) {
+            return false;
         }
 
         global $wpdb;
         $now = current_time('mysql');
-        $wpdb->replace(
-            $this->booking_meta_table,
-            [
-                'object_id' => (int) $booking_id,
-                'meta_key' => (string) $key,
-                'meta_value' => (string) $value,
-                'created_at' => $now,
-                'updated_at' => $now,
-            ],
-            ['%d', '%s', '%s', '%s', '%s']
+
+        $lp_booking_id          = (int)    $data['lp_booking_id'];
+        $partner_id             = (string) $data['partner_id'];
+        $location_id            = (string) ($data['location_id'] ?? '');
+        $payment_transaction_id = (string) ($data['payment_transaction_id'] ?? '');
+        $payment_external_ref   = (string) ($data['payment_external_ref'] ?? '');
+        $payment_status         = (string) ($data['payment_status'] ?? '');
+        $partner_charge         = (array_key_exists('partner_charge', $data) && $data['partner_charge'] !== null)
+                                      ? (float) $data['partner_charge'] : null;
+        $confirmed_at           = (array_key_exists('confirmed_at', $data) && $data['confirmed_at'] !== null)
+                                      ? (string) $data['confirmed_at'] : null;
+
+        // Pre-prepare nullable SQL fragments before the main prepare() call.
+        // %f returns a bare numeric string (no quotes); %s returns a quoted+escaped string.
+        // 'NULL' is emitted as a literal for truly null values.
+        $charge_sql    = $partner_charge !== null ? $wpdb->prepare('%f', $partner_charge) : 'NULL';
+        $confirmed_sql = $confirmed_at   !== null ? $wpdb->prepare('%s', $confirmed_at)   : 'NULL';
+
+        // Selective ON DUPLICATE KEY UPDATE clause: only overwrite fields present in $data.
+        // partner_id and created_at are intentionally excluded — never overwritten on duplicate.
+        $on_dup = ['updated_at = VALUES(updated_at)'];
+        if (array_key_exists('location_id', $data)) {
+            $on_dup[] = 'location_id = VALUES(location_id)';
+        }
+        if (array_key_exists('payment_transaction_id', $data)) {
+            $on_dup[] = 'payment_transaction_id = VALUES(payment_transaction_id)';
+        }
+        if (array_key_exists('payment_external_ref', $data)) {
+            $on_dup[] = 'payment_external_ref = VALUES(payment_external_ref)';
+        }
+        if (array_key_exists('payment_status', $data)) {
+            $on_dup[] = 'payment_status = VALUES(payment_status)';
+        }
+        if (array_key_exists('partner_charge', $data)) {
+            $on_dup[] = 'partner_charge = VALUES(partner_charge)';
+        }
+        if (array_key_exists('confirmed_at', $data)) {
+            $on_dup[] = 'confirmed_at = VALUES(confirmed_at)';
+        }
+        $on_dup_sql = implode(', ', $on_dup);
+
+        $t = $this->booking_partner_table;
+
+        // Single atomic INSERT ... ON DUPLICATE KEY UPDATE — eliminates any TOCTOU race condition.
+        // The $charge_sql / $confirmed_sql fragments are interpolated before $wpdb->prepare()
+        // processes the remaining %d/%s placeholders; they contain no user input.
+        // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        $sql = $wpdb->prepare(
+            "INSERT INTO `{$t}`
+                (lp_booking_id, partner_id, location_id, payment_transaction_id, payment_external_ref,
+                 payment_status, partner_charge, confirmed_at, created_at, updated_at)
+             VALUES (%d, %s, %s, %s, %s, %s, {$charge_sql}, {$confirmed_sql}, %s, %s)
+             ON DUPLICATE KEY UPDATE {$on_dup_sql}",
+            $lp_booking_id,
+            $partner_id,
+            $location_id,
+            $payment_transaction_id,
+            $payment_external_ref,
+            $payment_status,
+            $now,
+            $now
         );
+
+        $result = $wpdb->query($sql);
+
+        if ($result === false) {
+            $this->log_event('ERROR', 'UPSERT_BOOKING_RECORD_FAIL', [
+                'context' => [
+                    'lp_booking_id' => $lp_booking_id,
+                    'partner_id'    => $partner_id,
+                    'db_error'      => (string) $wpdb->last_error,
+                ],
+            ]);
+            return false;
+        }
+
+        return true;
+    }
+
+    private function get_partner_booking_record($booking_id) {
+        if (!$booking_id) {
+            return null;
+        }
+        global $wpdb;
+        $row = $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT * FROM {$this->booking_partner_table} WHERE lp_booking_id = %d LIMIT 1",
+                (int) $booking_id
+            )
+        );
+        return $row ?: null;
+    }
+
+    private function get_partner_booking_record_by_external_reference($partner_id, $external_reference) {
+        $partner_id = sanitize_text_field((string) $partner_id);
+        $external_reference = sanitize_text_field((string) $external_reference);
+        if ($partner_id === '' || $external_reference === '') {
+            return null;
+        }
+
+        global $wpdb;
+        $row = $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT * FROM {$this->booking_partner_table} WHERE partner_id = %s AND payment_external_ref = %s ORDER BY id DESC LIMIT 1",
+                $partner_id,
+                $external_reference
+            )
+        );
+
+        return $row ?: null;
+    }
+
+    private function get_booking_meta_value($booking_id, array $meta_keys) {
+        $booking_id = absint($booking_id);
+        if ($booking_id <= 0 || empty($meta_keys)) {
+            return '';
+        }
+
+        global $wpdb;
+
+        foreach ($meta_keys as $meta_key) {
+            $meta_key = sanitize_text_field((string) $meta_key);
+            if ($meta_key === '') {
+                continue;
+            }
+
+            $value = $wpdb->get_var(
+                $wpdb->prepare(
+                    "SELECT meta_value FROM {$this->booking_meta_table} WHERE object_id = %d AND meta_key = %s LIMIT 1",
+                    $booking_id,
+                    $meta_key
+                )
+            );
+
+            if (is_scalar($value) && trim((string) $value) !== '') {
+                return trim((string) $value);
+            }
+        }
+
+        return '';
+    }
+
+    private function get_booking_service_name($service_id, $booking = null) {
+        $service_name = sanitize_text_field((string) $this->safe_get($booking, 'service_name'));
+        if ($service_name !== '') {
+            return $service_name;
+        }
+
+        $service_name = sanitize_text_field((string) $this->safe_get_nested($booking, ['service', 'name']));
+        if ($service_name !== '') {
+            return $service_name;
+        }
+
+        $service_id = absint($service_id);
+        if ($service_id <= 0) {
+            return '';
+        }
+
+        global $wpdb;
+        $service_table = $wpdb->prefix . 'latepoint_services';
+        $service_name = $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT name FROM {$service_table} WHERE id = %d LIMIT 1",
+                $service_id
+            )
+        );
+
+        return is_scalar($service_name) ? sanitize_text_field((string) $service_name) : '';
+    }
+
+    private function build_booking_datetime_value($start_date, $start_time = '') {
+        $start_date = trim((string) $start_date);
+        $start_time = trim((string) $start_time);
+
+        if ($start_date === '') {
+            return '';
+        }
+
+        $date_string = trim($start_date . ' ' . $start_time);
+
+        try {
+            $timezone = function_exists('wp_timezone') ? wp_timezone() : new DateTimeZone('UTC');
+            $datetime = new DateTimeImmutable($date_string, $timezone);
+            return $datetime->format(DATE_ATOM);
+        } catch (Exception $exception) {
+            return '';
+        }
+    }
+
+    private function get_partner_webhook_config($partner_id) {
+        $partner_id = sanitize_text_field((string) $partner_id);
+        if ($partner_id === '') {
+            return ['url' => '', 'secret' => '', 'source' => ''];
+        }
+
+        $partner_cfg = $this->partner_registry ? $this->partner_registry->get_partner_config($partner_id) : null;
+        if (is_array($partner_cfg)) {
+            $url = esc_url_raw((string) ($partner_cfg['webhook_url'] ?? ''));
+            if ($url !== '') {
+                return [
+                    'url' => $url,
+                    'secret' => (string) ($partner_cfg['webhook_secret'] ?? ''),
+                    'source' => 'partner_config',
+                ];
+            }
+        }
+
+        $webhooks = $this->get_partner_webhooks();
+        if (isset($webhooks[$partner_id]) && is_array($webhooks[$partner_id])) {
+            return [
+                'url' => esc_url_raw((string) ($webhooks[$partner_id]['url'] ?? '')),
+                'secret' => (string) ($webhooks[$partner_id]['secret'] ?? ''),
+                'source' => 'legacy_webhooks',
+            ];
+        }
+
+        return ['url' => '', 'secret' => '', 'source' => ''];
+    }
+
+    private function resolve_booking_external_reference($partner_id, $booking_id, $booking = null, $customer_email = '') {
+        $booking_id = absint($booking_id);
+        $customer_email = sanitize_email((string) $customer_email);
+
+        $candidate_keys = ['external_reference', 'external_ref', 'payment_external_ref'];
+        foreach ($candidate_keys as $candidate_key) {
+            $candidate_value = sanitize_text_field((string) $this->safe_get($booking, $candidate_key));
+            if ($candidate_value !== '') {
+                return $candidate_value;
+            }
+        }
+
+        $meta_candidate = sanitize_text_field((string) $this->get_booking_meta_value($booking_id, [
+            'payment_external_reference',
+            'external_reference',
+            'partner_external_reference',
+            'payment_external_ref',
+        ]));
+        if ($meta_candidate !== '') {
+            return $meta_candidate;
+        }
+
+        $existing_record = $this->get_partner_booking_record($booking_id);
+        if ($existing_record && !empty($existing_record->payment_external_ref)) {
+            $record_value = sanitize_text_field((string) $existing_record->payment_external_ref);
+            if ($record_value !== '') {
+                return $record_value;
+            }
+        }
+
+        $mapping = $this->partner_registry ? $this->partner_registry->get_external_reference_mapping($partner_id) : '';
+        $mapping = sanitize_text_field((string) $mapping);
+        if ($mapping === '') {
+            return '';
+        }
+
+        $mapped_meta_value = sanitize_text_field((string) $this->get_booking_meta_value($booking_id, [$mapping]));
+        if ($mapped_meta_value !== '') {
+            return $mapped_meta_value;
+        }
+
+        $mapped_value = sanitize_text_field((string) $this->safe_get($booking, $mapping));
+        if ($mapped_value !== '') {
+            return $mapped_value;
+        }
+
+        if (strpos($mapping, '.') !== false) {
+            $mapped_nested_value = sanitize_text_field((string) $this->safe_get_nested($booking, array_map('trim', explode('.', $mapping))));
+            if ($mapped_nested_value !== '') {
+                return $mapped_nested_value;
+            }
+        }
+
+        switch (strtolower($mapping)) {
+            case 'booking_id':
+            case 'id':
+                return $booking_id > 0 ? (string) $booking_id : '';
+
+            case 'customer_email':
+            case 'email':
+                return $customer_email;
+
+            case 'partner_id':
+                return sanitize_text_field((string) $partner_id);
+
+            case 'service_id':
+                return sanitize_text_field((string) $this->safe_get($booking, 'service_id'));
+        }
+
+        return '';
     }
 
     private function get_current_partner_id($user_id = 0) {
@@ -368,7 +698,12 @@ class SOS_PG_Plugin {
             return preg_match('/^[a-zA-Z0-9_-]{1,64}$/', $cookie_pid) ? $cookie_pid : '';
         }
 
-        $partner_id = get_user_meta($user_id, 'partner_id', true);
+        // Nuova chiave prefissata (Fase 4 hardening); fallback sulla vecchia chiave per utenti esistenti.
+        $partner_id = get_user_meta($user_id, 'sos_pg_partner_id', true);
+        if (!is_string($partner_id) || trim($partner_id) === '') {
+            // Fallback compat: utenti creati prima della rinomina dei meta.
+            $partner_id = get_user_meta($user_id, 'partner_id', true);
+        }
         if (is_string($partner_id) && trim($partner_id) !== '') {
             return trim($partner_id);
         }
@@ -394,9 +729,355 @@ class SOS_PG_Plugin {
         return '/' . ($slug === '' ? 'partner-payment-callback' : $slug);
     }
 
+    private function current_completion_path() {
+        return '/partner-completion';
+    }
+
+    public function get_partner_completion_url($booking_id, array $args = []) {
+        $booking_id = (int) $booking_id;
+        if ($booking_id <= 0) {
+            return '';
+        }
+
+        $partner_id = sanitize_text_field((string) ($args['partner_id'] ?? ''));
+        if (!$this->is_valid_partner_id($partner_id)) {
+            $partner_id = '';
+        }
+
+        $query = [
+            'booking_id' => $booking_id,
+            'completion_token' => $this->generate_completion_token($booking_id, $partner_id),
+        ];
+
+        if ($partner_id !== '') {
+            $query['partner_id'] = $partner_id;
+        }
+
+        $phase = sanitize_key((string) ($args['phase'] ?? ''));
+        if ($phase !== '') {
+            $query['phase'] = $phase;
+        }
+
+        $external_reference = sanitize_text_field((string) ($args['external_reference'] ?? ''));
+        if ($external_reference !== '') {
+            $query['external_reference'] = $external_reference;
+        }
+
+        $opener_origin = $this->sanitize_opener_origin((string) ($args['opener_origin'] ?? ''));
+        if ($opener_origin !== '') {
+            $query['opener_origin'] = $opener_origin;
+        }
+
+        $source = sanitize_key((string) ($args['source'] ?? ''));
+        if ($source !== '') {
+            $query['source'] = $source;
+        }
+
+        return add_query_arg($query, home_url($this->current_completion_path() . '/'));
+    }
+
     private function current_request_path() {
         return (string) parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH);
     }
+
+    private function is_valid_partner_id($partner_id) {
+        return is_string($partner_id) && preg_match('/^[A-Za-z0-9_-]{1,64}$/', $partner_id) === 1;
+    }
+
+    private function normalize_local_path($path) {
+        $path = (string) $path;
+        if ($path === '') {
+            return '';
+        }
+
+        $normalized = '/' . ltrim($path, '/');
+        $normalized = untrailingslashit($normalized);
+        return $normalized === '' ? '/' : $normalized;
+    }
+
+    private function normalize_partner_id_key($partner_id) {
+        $partner_id = trim((string) $partner_id);
+        return $this->is_valid_partner_id($partner_id) ? strtolower($partner_id) : '';
+    }
+
+    private function completion_token_ttl() {
+        return 10 * MINUTE_IN_SECONDS;
+    }
+
+    private function completion_token_secret() {
+        return wp_salt('auth') . '|sos_pg_partner_completion';
+    }
+
+    private function base64url_encode($value) {
+        return rtrim(strtr(base64_encode((string) $value), '+/', '-_'), '=');
+    }
+
+    private function base64url_decode($value) {
+        $value = (string) $value;
+        if ($value === '') {
+            return false;
+        }
+
+        $padding = strlen($value) % 4;
+        if ($padding > 0) {
+            $value .= str_repeat('=', 4 - $padding);
+        }
+
+        return base64_decode(strtr($value, '-_', '+/'), true);
+    }
+
+    private function generate_completion_token($booking_id, $partner_id = '') {
+        $booking_id = (int) $booking_id;
+        if ($booking_id <= 0) {
+            return '';
+        }
+
+        $issued_at = time();
+        $partner_key = $this->normalize_partner_id_key($partner_id);
+        $payload = [
+            'b' => $booking_id,
+            'p' => $partner_key,
+            'iat' => $issued_at,
+            'exp' => $issued_at + $this->completion_token_ttl(),
+        ];
+        $payload_encoded = $this->base64url_encode(wp_json_encode($payload));
+        $signature = hash_hmac('sha256', $payload_encoded, $this->completion_token_secret());
+
+        return $payload_encoded . '.' . $signature;
+    }
+
+    private function verify_completion_token($token, $booking_id, $partner_id = '') {
+        $token = trim((string) $token);
+        $booking_id = (int) $booking_id;
+        if ($token === '' || $booking_id <= 0) {
+            return false;
+        }
+
+        $parts = explode('.', $token, 2);
+        if (count($parts) !== 2 || $parts[0] === '' || $parts[1] === '') {
+            return false;
+        }
+
+        $payload_encoded = $parts[0];
+        $signature = $parts[1];
+        $expected_signature = hash_hmac('sha256', $payload_encoded, $this->completion_token_secret());
+        if (!hash_equals($expected_signature, $signature)) {
+            return false;
+        }
+
+        $decoded = $this->base64url_decode($payload_encoded);
+        if (!is_string($decoded) || $decoded === '') {
+            return false;
+        }
+
+        $payload = json_decode($decoded, true);
+        if (!is_array($payload)) {
+            return false;
+        }
+
+        $token_booking_id = isset($payload['b']) ? (int) $payload['b'] : 0;
+        $issued_at = isset($payload['iat']) ? (int) $payload['iat'] : 0;
+        $expires_at = isset($payload['exp']) ? (int) $payload['exp'] : 0;
+        $token_partner_key = $this->normalize_partner_id_key((string) ($payload['p'] ?? ''));
+        $expected_partner_key = $this->normalize_partner_id_key($partner_id);
+
+        if ($token_booking_id !== $booking_id || $issued_at <= 0 || $expires_at <= 0) {
+            return false;
+        }
+
+        $now = time();
+        if ($issued_at > ($now + 60) || $expires_at < $now || ($expires_at - $issued_at) > $this->completion_token_ttl()) {
+            return false;
+        }
+
+        if ($expected_partner_key !== '' && $token_partner_key !== $expected_partner_key) {
+            return false;
+        }
+
+        return true;
+    }
+
+    private function sanitize_opener_origin($origin) {
+        $origin = trim((string) $origin);
+        if ($origin === '') {
+            return '';
+        }
+
+        $parts = wp_parse_url($origin);
+        if (!is_array($parts)) {
+            return '';
+        }
+
+        $scheme = strtolower((string) ($parts['scheme'] ?? ''));
+        $host = (string) ($parts['host'] ?? '');
+        if (!in_array($scheme, ['http', 'https'], true) || $host === '') {
+            return '';
+        }
+
+        $normalized = $scheme . '://' . $host;
+        if (isset($parts['port'])) {
+            $normalized .= ':' . (int) $parts['port'];
+        }
+
+        return $normalized;
+    }
+
+    private function sanitize_partner_return_url($url) {
+        $url = esc_url_raw((string) $url);
+        if ($url === '' || !wp_http_validate_url($url)) {
+            error_log('[SOS SSO] return_url validation invalid value=' . ($url !== '' ? $url : ''));
+            return '';
+        }
+
+        $scheme = strtolower((string) wp_parse_url($url, PHP_URL_SCHEME));
+        if (!in_array($scheme, ['http', 'https'], true)) {
+            error_log('[SOS SSO] return_url validation invalid_scheme value=' . $url);
+            return '';
+        }
+
+        error_log('[SOS SSO] return_url validation ok value=' . $url);
+        return $url;
+    }
+
+    private function is_partner_enabled_page_id($post_id) {
+        $post_id = (int) $post_id;
+        return $post_id > 0 && (int) get_post_meta($post_id, '_sos_pg_partner_enabled', true) === 1;
+    }
+
+    private function has_active_partner_session() {
+        return $this->is_valid_partner_id($this->get_current_partner_id());
+    }
+
+    private function is_partner_page_url($url) {
+        $url = trim((string) $url);
+        if ($url === '') {
+            return false;
+        }
+
+        $home_host = strtolower((string) parse_url(home_url('/'), PHP_URL_HOST));
+        $url_host = strtolower((string) parse_url($url, PHP_URL_HOST));
+        if ($url_host !== '' && $home_host !== '' && $url_host !== $home_host) {
+            return false;
+        }
+
+        $post_id = url_to_postid($url);
+        if ($this->is_partner_enabled_page_id($post_id)) {
+            return true;
+        }
+
+        $url_path = $this->normalize_local_path((string) parse_url($url, PHP_URL_PATH));
+        if ($url_path === '') {
+            return false;
+        }
+
+        foreach ($this->get_partner_routes() as $route) {
+            $route_host = strtolower((string) parse_url((string) $route, PHP_URL_HOST));
+            if ($route_host !== '' && $home_host !== '' && $route_host !== $home_host) {
+                continue;
+            }
+
+            $route_path = $this->normalize_local_path((string) parse_url((string) $route, PHP_URL_PATH));
+            if ($route_path !== '' && $route_path === $url_path) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function is_partner_rest_route($rest_route = '') {
+        $rest_route = (string) $rest_route;
+        return $rest_route !== '' && strpos($rest_route, '/sos-pg/v1/') === 0;
+    }
+
+    private function is_partner_rest_request($rest_route = '') {
+        if ($this->is_partner_rest_route($rest_route)) {
+            return true;
+        }
+
+        if (!defined('REST_REQUEST') || !REST_REQUEST) {
+            return false;
+        }
+
+        $request_uri = (string) ($_SERVER['REQUEST_URI'] ?? '');
+        return strpos($request_uri, '/wp-json/sos-pg/v1/') !== false;
+    }
+
+    private function is_partner_endpoint_request() {
+        $request_path = $this->normalize_local_path($this->current_request_path());
+        $login_path = $this->normalize_local_path($this->current_endpoint_path());
+        $callback_path = $this->normalize_local_path($this->current_payment_callback_path());
+        $completion_path = $this->normalize_local_path($this->current_completion_path());
+
+        if ($request_path !== '' && ($request_path === $login_path || $request_path === $callback_path || $request_path === $completion_path)) {
+            return true;
+        }
+
+        return isset($_GET['sos_pg_webhook'])
+            || isset($_GET['sos_pg_tester_webhook'])
+            || isset($_GET['sos_pg_book_now'])
+            || isset($_GET['sos_pg_completion_url']);
+    }
+
+    private function is_partner_latepoint_flow_request() {
+        $route_name = sanitize_text_field((string) ($_REQUEST['route_name'] ?? ''));
+        if ($route_name === '') {
+            return false;
+        }
+
+        $allowed_routes = [
+            'steps__start',
+            'steps__load_step',
+            'steps__reload_booking_form_summary_panel',
+        ];
+
+        return in_array($route_name, $allowed_routes, true);
+    }
+
+    public function is_partner_context($scope = 'generic', array $context = []) {
+        $rest_route = isset($context['rest_route']) ? (string) $context['rest_route'] : '';
+        if ($this->is_partner_rest_request($rest_route) || $this->is_partner_endpoint_request()) {
+            return true;
+        }
+
+        $active_partner_id = $this->get_current_partner_id();
+        $has_active_partner = $this->is_valid_partner_id($active_partner_id);
+        if ($has_active_partner && $this->is_partner_latepoint_flow_request()) {
+            return true;
+        }
+
+        if (is_admin()) {
+            return false;
+        }
+
+        if ($has_active_partner) {
+            $post_id = function_exists('get_queried_object_id') ? (int) get_queried_object_id() : 0;
+            if ($this->is_partner_enabled_page_id($post_id)) {
+                return true;
+            }
+
+            $referer = isset($context['referer']) ? (string) $context['referer'] : (string) wp_get_referer();
+            if ($referer !== '' && $this->is_partner_page_url($referer)) {
+                return true;
+            }
+        }
+
+        if (!empty($context['allow_location_lookup'])) {
+            $location_partner_id = $this->get_partner_id_by_location($context['location_id'] ?? '');
+            if ($this->is_valid_partner_id($location_partner_id)) {
+                return true;
+            }
+        }
+
+        $verified_partner_id = isset($context['verified_partner_id']) ? (string) $context['verified_partner_id'] : '';
+        if ($this->is_valid_partner_id($verified_partner_id)) {
+            return true;
+        }
+
+        return false;
+    }
+
+
 
     private function get_ip() {
         return sanitize_text_field((string) ($_SERVER['REMOTE_ADDR'] ?? 'unknown'));
@@ -518,7 +1199,7 @@ class SOS_PG_Plugin {
             }
         }
 
-        $critical_info_events = ['PARTNER_LOGIN_OK', 'PAYMENT_CALLBACK_OK'];
+        $critical_info_events = ['PARTNER_LOGIN_OK', 'PAYMENT_CALLBACK_OK', 'WEBHOOK_BOOKING_SENT', 'WEBHOOK_BOOKING_RESPONSE'];
         $is_critical = in_array($lvl, ['WARN', 'ERROR', 'CRITICAL', 'ALERT', 'EMERGENCY'], true)
             || in_array($event, $critical_info_events, true)
             || strpos($event, 'FAIL') !== false;
@@ -641,75 +1322,65 @@ class SOS_PG_Plugin {
     }
 
     public function protect_partner_pages() {
-        $__sos_pg_t0 = microtime(true);
         if (is_admin() || wp_doing_ajax() || !is_page()) {
-            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
-            if ($__sos_pg_dt > 0.05) {
-                error_log(sprintf('SOS_PG PERF protect_partner_pages: %.4f sec', $__sos_pg_dt));
-            }
             return;
         }
 
         $post_id = get_queried_object_id();
         if (!$post_id) {
-            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
-            if ($__sos_pg_dt > 0.05) {
-                error_log(sprintf('SOS_PG PERF protect_partner_pages: %.4f sec', $__sos_pg_dt));
-            }
             return;
         }
 
-        $enabled = (int) get_post_meta($post_id, '_sos_pg_partner_enabled', true);
-        if (!$enabled) {
-            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
-            if ($__sos_pg_dt > 0.05) {
-                error_log(sprintf('SOS_PG PERF protect_partner_pages: %.4f sec', $__sos_pg_dt));
-            }
+        if (!(int) get_post_meta($post_id, '_sos_pg_partner_enabled', true)) {
             return;
         }
 
-        $required_partner = (string) get_post_meta($post_id, '_sos_pg_partner_id', true);
-        $courtesy_page_id = (int) $this->get_settings()['courtesy_page_id'];
+        $required_partner   = (string) get_post_meta($post_id, '_sos_pg_partner_id', true);
+        $current_partner_id = $this->get_current_partner_id(); // checks WP user meta + cookie fallback
 
-        if (!is_user_logged_in()) {
-            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
-            if ($__sos_pg_dt > 0.05) {
-                error_log(sprintf('SOS_PG PERF protect_partner_pages: %.4f sec', $__sos_pg_dt));
-            }
-            wp_safe_redirect($courtesy_page_id ? get_permalink($courtesy_page_id) : home_url('/'));
+        error_log('SOS_PG HANDOFF PROTECT page=' . (int) $post_id . ' required_partner=' . $required_partner . ' current_partner=' . $current_partner_id);
+
+        // No valid partner in session or cookie → redirect to login endpoint.
+        // The login endpoint is handled at init (exits before template_redirect) → no loop.
+        if (!$this->is_valid_partner_id($current_partner_id)) {
+            $login_url = home_url($this->current_endpoint_path() . '/');
+
+            // Courtesy-page fallback only if it is not itself a partner-protected page (anti-loop).
+            $courtesy_page_id = (int) $this->get_settings()['courtesy_page_id'];
+            $fallback_url = ($courtesy_page_id && !$this->is_partner_enabled_page_id($courtesy_page_id))
+                ? get_permalink($courtesy_page_id)
+                : home_url('/');
+
+            // Prefer the login endpoint; use fallback if the slug somehow resolves to the same page.
+            $redirect = (untrailingslashit($login_url) !== untrailingslashit((string) get_permalink($post_id)))
+                ? $login_url
+                : $fallback_url;
+
+            $fallback_reason = (untrailingslashit($login_url) !== untrailingslashit((string) get_permalink($post_id)))
+                ? 'missing_partner_session_redirect_to_login_endpoint'
+                : 'missing_partner_session_login_equals_page_use_fallback';
+            error_log('SOS_PG HANDOFF REDIRECT FALLBACK reason=' . $fallback_reason);
+            error_log('SOS_PG HANDOFF REDIRECT FINAL url=' . $redirect);
+
+            wp_safe_redirect($redirect);
             exit;
         }
 
-        $user_partner = (string) get_user_meta(get_current_user_id(), 'partner_id', true);
-
-        if ($required_partner && $user_partner !== $required_partner) {
-            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
-            if ($__sos_pg_dt > 0.05) {
-                error_log(sprintf('SOS_PG PERF protect_partner_pages: %.4f sec', $__sos_pg_dt));
-            }
+        // Valid partner in session, but wrong partner for this specific page → hard block.
+        if ($required_partner !== '' && $current_partner_id !== $required_partner) {
             $this->log_event('WARN', 'PAGE_BLOCKED_PARTNER_MISMATCH', [
                 'partner_id' => $required_partner,
-                'email' => wp_get_current_user()->user_email,
-                'ip' => $this->get_ip(),
-                'reason' => 'Utente con partner_id diverso',
+                'email'      => is_user_logged_in() ? wp_get_current_user()->user_email : '',
+                'ip'         => $this->get_ip(),
+                'reason'     => 'Utente con partner_id diverso',
             ]);
             wp_die('Accesso non consentito a questa pagina partner.', 'Accesso negato', ['response' => 403]);
         }
 
-        // Assicura che il partner_id sia disponibile per il pricing LatePoint (cookie/session) nel flow partner.
+        // Access granted. Refresh the partner cookie so LatePoint pricing works in the wizard.
         $cookie_pid = sanitize_text_field((string) ($_COOKIE['sos_pg_partner_id'] ?? ''));
-        if ($cookie_pid !== $required_partner) {
-            // TEMP DEBUG: conferma contesto partner pronto per sconti/pay_on_partner.
-            error_log('SOS_PG PARTNER CONTEXT READY partner=' . $required_partner . ' source=page_meta_refresh');
-            setcookie('sos_pg_partner_id', $required_partner, time() + 4 * HOUR_IN_SECONDS, '/', '', is_ssl(), false);
-        } else {
-            // TEMP DEBUG: il contesto partner è già presente via cookie.
-            error_log('SOS_PG PARTNER CONTEXT READY partner=' . $required_partner . ' source=cookie');
-        }
-
-        $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
-        if ($__sos_pg_dt > 0.05) {
-            error_log(sprintf('SOS_PG PERF protect_partner_pages: %.4f sec', $__sos_pg_dt));
+        if ($cookie_pid !== $current_partner_id) {
+            setcookie('sos_pg_partner_id', $current_partner_id, time() + 4 * HOUR_IN_SECONDS, '/', '', is_ssl(), true);
         }
     }
 
@@ -764,10 +1435,20 @@ class SOS_PG_Plugin {
     public function handle_partner_login() {
         $endpoint = $this->current_endpoint_path();
         $request_path = $this->current_request_path();
+        $timestamp_window = 3600;
 
         if ($request_path !== $endpoint && $request_path !== $endpoint . '/') {
             return;
         }
+
+        if (!$this->is_partner_context('partner_login')) {
+            status_header(403);
+            exit('Contesto partner non valido');
+        }
+
+        $incoming_method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
+        $incoming_query_partner = sanitize_text_field((string) ($_GET['partner_id'] ?? ''));
+        error_log('SOS_PG HANDOFF ENTRY method=' . $incoming_method . ' url=' . (string) ($_SERVER['REQUEST_URI'] ?? '') . ' query_partner=' . $incoming_query_partner);
 
         $ip = $this->get_ip();
         $ua = sanitize_text_field((string) ($_SERVER['HTTP_USER_AGENT'] ?? 'unknown'));
@@ -792,8 +1473,17 @@ class SOS_PG_Plugin {
         $email = sanitize_email(wp_unslash($_POST['payload'] ?? ''));
         $timestamp = (int) wp_unslash($_POST['timestamp'] ?? 0);
         $nonce = sanitize_text_field(wp_unslash($_POST['nonce'] ?? ''));
+        $partner_return_url = $this->sanitize_partner_return_url((string) wp_unslash($_POST['return_url'] ?? ''));
+        $opener_origin = $this->sanitize_opener_origin((string) wp_unslash($_POST['opener_origin'] ?? ''));
+        $flow_context = sanitize_key((string) wp_unslash($_POST['sos_pg_flow_context'] ?? ''));
+        if ($flow_context !== 'partner_wordpress_popup') {
+            $flow_context = '';
+        }
         $signature_b64 = (string) wp_unslash($_POST['signature'] ?? '');
         $signature = base64_decode($signature_b64, true);
+
+        error_log('SOS_PG HANDOFF LOGIN INPUT partner=' . $partner_id . ' email=' . $email);
+        error_log('[SOS SSO] handle_partner_login partner_id=' . $partner_id . ' requested_return_url=' . $partner_return_url);
 
         if ($partner_id === '') {
             $this->register_fail('partner_id mancante');
@@ -807,11 +1497,18 @@ class SOS_PG_Plugin {
             exit('Email non valida');
         }
 
-        // TEMP DEBUG timestamp handoff
-        error_log('SOS_PG LOGIN TIMESTAMP now=' . time() . ' received=' . $timestamp . ' diff=' . abs(time() - (int) $timestamp) . ' partner=' . $partner_id);
-
-        // TEMP FIX: aumentata tolleranza timestamp per debug clock skew
-        if (!$timestamp || abs(time() - $timestamp) > 3600) {
+        if (!$timestamp || abs(time() - $timestamp) > $timestamp_window) {
+            $server_timestamp = time();
+            $this->log_event('WARN', 'PARTNER_LOGIN_TIMESTAMP_INVALID', [
+                'partner_id' => $partner_id,
+                'email' => $email,
+                'reason' => 'invalid_timestamp',
+                'context' => [
+                    'incoming_timestamp' => (int) $timestamp,
+                    'server_timestamp' => $server_timestamp,
+                    'skew_seconds' => abs($server_timestamp - (int) $timestamp),
+                ],
+            ]);
             $this->register_fail('timestamp scaduto', $partner_id, $email);
             status_header(403);
             exit('Richiesta scaduta');
@@ -847,15 +1544,7 @@ class SOS_PG_Plugin {
 
         $message = $partner_id . '|' . $email . '|' . $timestamp . '|' . $nonce;
 
-        // TEMP DEBUG signature verify
-        error_log('SOS_PG LOGIN VERIFY partner=' . $partner_id . ' message=' . $message);
-        // TEMP DEBUG signature verify
-        error_log('SOS_PG LOGIN VERIFY KEY partner=' . $partner_id . ' key_valid=' . ($public_key ? 'yes' : 'no') . ' source=' . ($has_partner_key ? 'partner_config' : 'global_settings'));
-
         $ok = openssl_verify($message, $signature, $public_key, OPENSSL_ALGO_SHA256);
-
-        // TEMP DEBUG signature verify
-        error_log('SOS_PG LOGIN VERIFY RESULT partner=' . $partner_id . ' ok=' . (string) $ok);
 
         if ($ok !== 1) {
             $this->register_fail('firma non valida', $partner_id, $email);
@@ -863,21 +1552,53 @@ class SOS_PG_Plugin {
             exit('Firma non valida');
         }
 
+        error_log('SOS_PG HANDOFF LOGIN OK partner=' . $partner_id);
+
+        $used_nonce_key = 'sos_pg_used_nonce_' . md5($partner_id . '|' . $nonce);
+        if (get_transient($used_nonce_key)) {
+            $this->register_fail('replay_nonce', $partner_id, $email);
+            status_header(403);
+            exit('Firma non valida');
+        }
+        set_transient($used_nonce_key, 1, $timestamp_window);
+
         $page = $this->find_partner_page_by_partner_id($partner_id);
         $routes = $this->get_partner_routes();
         $route = $routes[$partner_id] ?? '';
+        if ($route === '') {
+            $route = $routes[strtolower($partner_id)] ?? ($routes[strtoupper($partner_id)] ?? '');
+        }
+
+        if ($route !== '') {
+            error_log('SOS_PG HANDOFF REDIRECT route_found=' . $route);
+        } else {
+            error_log('SOS_PG HANDOFF REDIRECT route_found=none');
+        }
+
+        if ($page) {
+            error_log('SOS_PG HANDOFF REDIRECT page_found=' . (int) $page->ID . ' url=' . $this->get_redirect_url_for_page($page->ID));
+        } else {
+            error_log('SOS_PG HANDOFF REDIRECT page_found=none partner=' . $partner_id);
+        }
 
         if ($route) {
             $redirect_url = (strpos($route, 'http://') === 0 || strpos($route, 'https://') === 0)
                 ? $route
                 : home_url($route);
+            error_log('SOS_PG HANDOFF REDIRECT FALLBACK reason=route_match');
         } elseif ($page) {
             $redirect_url = $this->get_redirect_url_for_page($page->ID);
+            error_log('SOS_PG HANDOFF REDIRECT FALLBACK reason=partner_page_match');
         } else {
+            error_log('SOS_PG HANDOFF REDIRECT FALLBACK reason=missing_partner_route_and_page');
             $this->register_fail('pagina partner non configurata', $partner_id, $email);
             status_header(404);
             exit('Pagina partner non configurata');
         }
+
+        error_log('SOS_PG HANDOFF REDIRECT FINAL url=' . $redirect_url);
+        error_log('SOS_PG HANDOFF REDIRECT PROPAGATION partner=' . $partner_id . ' target=' . $redirect_url);
+        error_log('[SOS SSO] handle_partner_login resolved_login_target partner_id=' . $partner_id . ' login_target=' . $redirect_url . ' return_target=' . ($partner_return_url !== '' ? $partner_return_url : ''));
 
         $user = get_user_by('email', $email);
         $is_new_user = false;
@@ -907,9 +1628,24 @@ class SOS_PG_Plugin {
             }
         }
 
-        update_user_meta($user->ID, 'partner_id', $partner_id);
-        update_user_meta($user->ID, 'partner_last_login', time());
-        update_user_meta($user->ID, 'partner_target_page', $redirect_url);
+        update_user_meta($user->ID, 'sos_pg_partner_id', $partner_id);
+        update_user_meta($user->ID, 'sos_pg_partner_last_login', time());
+        update_user_meta($user->ID, 'sos_pg_partner_target_page', $redirect_url);
+        if ($partner_return_url !== '') {
+            update_user_meta($user->ID, 'sos_pg_partner_return_url', $partner_return_url);
+        } else {
+            delete_user_meta($user->ID, 'sos_pg_partner_return_url');
+        }
+        if ($opener_origin !== '') {
+            update_user_meta($user->ID, 'sos_pg_partner_opener_origin', $opener_origin);
+        } else {
+            delete_user_meta($user->ID, 'sos_pg_partner_opener_origin');
+        }
+        if ($flow_context !== '') {
+            update_user_meta($user->ID, 'sos_pg_partner_flow_context', $flow_context);
+        } else {
+            delete_user_meta($user->ID, 'sos_pg_partner_flow_context');
+        }
 
         wp_clear_auth_cookie();
         wp_set_current_user($user->ID);
@@ -928,14 +1664,14 @@ class SOS_PG_Plugin {
             'user_agent' => $ua,
             'context' => [
                 'timestamp' => $timestamp,
-                'nonce' => $nonce,
                 'redirect' => $redirect_url,
             ],
         ]);
 
         // Cookie di cortesia per frontend LatePoint se la sessione WP viene persa.
-        setcookie('sos_pg_partner_id', $partner_id, time() + 4 * HOUR_IN_SECONDS, '/', '', is_ssl(), false);
+        setcookie('sos_pg_partner_id', $partner_id, time() + 4 * HOUR_IN_SECONDS, '/', '', is_ssl(), true);
 
+        error_log('[SOS SSO] handle_partner_login redirect_final partner_id=' . $partner_id . ' login_target=' . $redirect_url);
         wp_safe_redirect($redirect_url);
         exit;
     }
@@ -954,6 +1690,914 @@ class SOS_PG_Plugin {
     private function get_logs_count() {
         global $wpdb;
         return (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$this->table_logs}" );
+    }
+
+    private function resolve_partner_route_target($partner_id) {
+        $partner_id = trim((string) $partner_id);
+        if ($partner_id === '') {
+            return '';
+        }
+
+        $routes = $this->get_partner_routes();
+        $route = $routes[$partner_id] ?? '';
+        if ($route === '') {
+            $route = $routes[strtolower($partner_id)] ?? ($routes[strtoupper($partner_id)] ?? '');
+        }
+
+        if ($route === '') {
+            return '';
+        }
+
+        return (strpos($route, 'http://') === 0 || strpos($route, 'https://') === 0)
+            ? $route
+            : home_url($route);
+    }
+
+    private function resolve_partner_page_target($partner_id) {
+        $page = $this->find_partner_page_by_partner_id($partner_id);
+        return $page ? $this->get_redirect_url_for_page($page->ID) : '';
+    }
+
+    private function validate_completion_return_url($url) {
+        $url = esc_url_raw((string) $url);
+        if ($url === '' || !wp_http_validate_url($url)) {
+            return '';
+        }
+
+        $scheme = strtolower((string) wp_parse_url($url, PHP_URL_SCHEME));
+        if (!in_array($scheme, ['http', 'https'], true)) {
+            return '';
+        }
+
+        return $url;
+    }
+
+    private function resolve_partner_configured_return_url($partner_id = '') {
+        $partner_id = trim((string) $partner_id);
+        if ($partner_id !== '') {
+            $partner_cfg = $this->partner_registry ? $this->partner_registry->get_partner_config($partner_id) : null;
+            $completion_return_url = is_array($partner_cfg)
+                ? $this->validate_completion_return_url((string) ($partner_cfg['completion_return_url'] ?? ''))
+                : '';
+            if ($completion_return_url !== '') {
+                error_log('[SOS SSO] completion final return source=completion_return_url target=' . $completion_return_url);
+                return $completion_return_url;
+            }
+
+            $route_target = $this->resolve_partner_route_target($partner_id);
+            if ($route_target !== '' && wp_http_validate_url($route_target)) {
+                error_log('[SOS SSO] completion final return source=config_route target=' . $route_target);
+                return $route_target;
+            }
+
+            $page_target = $this->resolve_partner_page_target($partner_id);
+            if ($page_target !== '' && wp_http_validate_url($page_target)) {
+                error_log('[SOS SSO] completion final return source=config_page target=' . $page_target);
+                return $page_target;
+            }
+
+            error_log('[SOS SSO] completion final return source=login_endpoint target=' . $this->get_login_endpoint_url());
+            return $this->get_login_endpoint_url();
+        }
+
+        error_log('[SOS SSO] completion final return source=home target=' . home_url('/'));
+        return home_url('/');
+    }
+
+    private function resolve_partner_return_url($partner_id = '') {
+        $user_id = get_current_user_id();
+        if ($user_id > 0) {
+            $stored = trim((string) get_user_meta($user_id, 'sos_pg_partner_return_url', true));
+            if ($stored !== '' && wp_http_validate_url($stored)) {
+                error_log('[SOS SSO] completion return target source=saved_return_url target=' . $stored);
+                return $stored;
+            }
+        }
+
+        $partner_id = trim((string) $partner_id);
+        if ($partner_id !== '') {
+            $route_target = $this->resolve_partner_route_target($partner_id);
+            if ($route_target !== '' && wp_http_validate_url($route_target)) {
+                error_log('[SOS SSO] completion return target source=route target=' . $route_target);
+                return $route_target;
+            }
+
+            $page_target = $this->resolve_partner_page_target($partner_id);
+            if ($page_target !== '' && wp_http_validate_url($page_target)) {
+                error_log('[SOS SSO] completion return target source=page target=' . $page_target);
+                return $page_target;
+            }
+
+            error_log('[SOS SSO] completion return target source=login_endpoint target=' . $this->get_login_endpoint_url());
+            return $this->get_login_endpoint_url();
+        }
+
+        error_log('[SOS SSO] completion return target source=home target=' . home_url('/'));
+        return home_url('/');
+    }
+
+    private function resolve_partner_completion_final_url($partner_id = '') {
+        $partner_id = trim((string) $partner_id);
+        if ($partner_id !== '') {
+            $partner_cfg = $this->partner_registry ? $this->partner_registry->get_partner_config($partner_id) : null;
+            $completion_return_url = is_array($partner_cfg)
+                ? $this->validate_completion_return_url((string) ($partner_cfg['completion_return_url'] ?? ''))
+                : '';
+            if ($completion_return_url !== '') {
+                error_log('[SOS SSO] completion final target source=completion_return_url target=' . $completion_return_url);
+                return $completion_return_url;
+            }
+        }
+
+        return $this->resolve_partner_return_url($partner_id);
+    }
+
+    private function should_use_partner_payment_completion_return($partner_id, $record = null) {
+        $partner_id = trim((string) $partner_id);
+        if ($partner_id === '') {
+            return false;
+        }
+
+        if (strtolower($partner_id) !== 'caf') {
+            return false;
+        }
+
+        if ($record !== null && isset($record->partner_charge) && (float) $record->partner_charge > 0) {
+            return true;
+        }
+
+        $discount_config = $this->get_partner_discount_config($partner_id);
+        return !empty($discount_config['pay_on_partner']);
+    }
+
+    private function get_booking_row($booking_id) {
+        $booking_id = absint($booking_id);
+        if ($booking_id <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+        $row = $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT * FROM {$this->booking_table} WHERE id = %d LIMIT 1",
+                $booking_id
+            )
+        );
+
+        return $row ?: null;
+    }
+
+    private function get_booking_customer_email($booking = null) {
+        $email = sanitize_email((string) $this->safe_get($booking, 'customer_email'));
+        if ($email !== '') {
+            return $email;
+        }
+
+        $email = sanitize_email((string) $this->safe_get_nested($booking, ['customer', 'email']));
+        if ($email !== '') {
+            return $email;
+        }
+
+        $customer_id = absint($this->safe_get($booking, 'customer_id'));
+        if ($customer_id <= 0) {
+            return '';
+        }
+
+        global $wpdb;
+        $customer_table = $wpdb->prefix . 'latepoint_customers';
+        $email = $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT email FROM {$customer_table} WHERE id = %d LIMIT 1",
+                $customer_id
+            )
+        );
+
+        return is_scalar($email) ? sanitize_email((string) $email) : '';
+    }
+
+    private function build_partner_payment_completion_return_url($base_url, $partner_id, $booking_id, $record = null) {
+        $base_url = $this->validate_completion_return_url($base_url);
+        $partner_id = sanitize_text_field((string) $partner_id);
+        $booking_id = absint($booking_id);
+        $incoming_requested_booking_id = $booking_id;
+        $is_caf_partner = ($this->normalize_partner_id_key($partner_id) === 'caf');
+
+        if ($base_url === '' || $partner_id === '' || $booking_id <= 0) {
+            return $base_url;
+        }
+
+        if (!$this->should_use_partner_payment_completion_return($partner_id, $record)) {
+            return $base_url;
+        }
+
+        $latepoint_booking_id = $booking_id;
+        if ($is_caf_partner) {
+            $latepoint_booking_id = ($record !== null && isset($record->lp_booking_id)) ? absint($record->lp_booking_id) : 0;
+            if ($latepoint_booking_id <= 0) {
+                error_log('[SOS SSO] FAKE_PAYMENT_COMPLETION_URL_ABORT_NO_VERIFIED_RECORD ' . wp_json_encode([
+                    'incoming_requested_booking_id' => $incoming_requested_booking_id,
+                    'partner_record_id' => absint($this->safe_get($record, 'id')),
+                    'partner_record_lp_booking_id' => absint($this->safe_get($record, 'lp_booking_id')),
+                    'reason' => $record === null ? 'missing_record' : 'missing_lp_booking_id',
+                    'base_url' => $base_url,
+                ]));
+                return $base_url;
+            }
+        } elseif ($record !== null && isset($record->lp_booking_id) && absint($record->lp_booking_id) > 0) {
+            $latepoint_booking_id = absint($record->lp_booking_id);
+        }
+
+        $booking = $this->get_booking_row($latepoint_booking_id);
+        $booking_id_real = absint($this->safe_get($booking, 'id'));
+        if ($booking_id_real <= 0) {
+            $booking_id_real = $latepoint_booking_id;
+        }
+        $email = $this->get_booking_customer_email($booking);
+        $service_name = $this->get_booking_service_name($this->safe_get($booking, 'service_id'), $booking);
+        $booking_datetime = $this->build_booking_datetime_value(
+            $this->safe_get($booking, 'start_date'),
+            $this->safe_get($booking, 'start_time')
+        );
+        $external_reference = $this->resolve_booking_external_reference($partner_id, $booking_id_real, $booking, $email);
+
+        $amount = null;
+        if ($record !== null && isset($record->partner_charge) && $record->partner_charge !== null && (float) $record->partner_charge > 0) {
+            $amount = (float) $record->partner_charge;
+        } else {
+            $booking_total = $this->safe_get($booking, 'total');
+            if ($booking_total !== '') {
+                $amount = (float) $booking_total;
+            }
+        }
+
+        $query_args = [
+            'fake_payment' => '1',
+            'booking_id' => $booking_id_real,
+            'partner_id' => $partner_id,
+        ];
+
+        if ($email !== '') {
+            $query_args['email'] = $email;
+        }
+        if ($service_name !== '') {
+            $query_args['service'] = $service_name;
+        }
+        if ($booking_datetime !== '') {
+            $query_args['datetime'] = $booking_datetime;
+        }
+        if ($amount !== null) {
+            $query_args['amount'] = $amount;
+        }
+        if ($external_reference !== '') {
+            $query_args['external_reference'] = $external_reference;
+        }
+
+        $dynamic_url = add_query_arg($query_args, $base_url);
+        $dynamic_url = $this->validate_completion_return_url($dynamic_url);
+
+        if ($dynamic_url !== '') {
+            error_log('[SOS SSO] FAKE_PAYMENT_COMPLETION_URL ' . wp_json_encode([
+                'incoming_requested_booking_id' => $incoming_requested_booking_id,
+                'incoming_external_reference' => $this->safe_get($record, 'payment_external_ref'),
+                'partner_record_id' => absint($this->safe_get($record, 'id')),
+                'partner_record_lp_booking_id' => absint($this->safe_get($record, 'lp_booking_id')),
+                'final_booking_id_used' => $booking_id_real,
+                'final_external_reference_used' => $external_reference,
+                'final_fake_gateway_url' => $dynamic_url,
+            ]));
+            if ($this->should_use_partner_payment_completion_return($partner_id, $record) && absint($this->safe_get($record, 'lp_booking_id')) <= 0) {
+                error_log('[SOS SSO] FAKE_PAYMENT_COMPLETION_URL_WARN missing_lp_booking_id ' . wp_json_encode([
+                    'incoming_requested_booking_id' => $incoming_requested_booking_id,
+                    'incoming_external_reference' => $this->safe_get($record, 'payment_external_ref'),
+                    'partner_record_id' => absint($this->safe_get($record, 'id')),
+                    'partner_record_lp_booking_id' => absint($this->safe_get($record, 'lp_booking_id')),
+                    'final_booking_id_used' => $booking_id_real,
+                    'final_external_reference_used' => $external_reference,
+                    'final_fake_gateway_url' => $dynamic_url,
+                ]));
+            }
+            error_log('[SOS SSO] completion final target source=completion_return_url_dynamic target=' . $dynamic_url);
+            return $dynamic_url;
+        }
+
+        return $base_url;
+    }
+
+    public function enqueue_partner_completion_monitor_script() {
+        $request_path = (string) parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH);
+        $is_partner_caf_path = strpos($request_path, '/partner-caf') !== false;
+        if ($is_partner_caf_path) {
+            error_log('[SOS SSO] ENQUEUE FUNCTION ENTERED');
+        }
+        $queried_post_id = function_exists('get_queried_object_id') ? (int) get_queried_object_id() : 0;
+        $is_page_request = is_page();
+        $partner_enabled_meta = $queried_post_id > 0 ? (string) get_post_meta($queried_post_id, '_sos_pg_partner_enabled', true) : '';
+        $resolved_partner_id = $this->get_current_partner_id();
+
+        if ($is_partner_caf_path) {
+            error_log('[SOS SSO] completion monitor runtime path=' . $request_path
+                . ' is_admin=' . (is_admin() ? '1' : '0')
+                . ' wp_doing_ajax=' . (wp_doing_ajax() ? '1' : '0')
+                . ' is_page=' . ($is_page_request ? '1' : '0')
+                . ' queried_object_id=' . $queried_post_id
+                . ' partner_enabled_meta=' . ($partner_enabled_meta !== '' ? $partner_enabled_meta : '(empty)')
+                . ' resolved_partner_id=' . ($resolved_partner_id !== '' ? $resolved_partner_id : '(empty)'));
+        }
+
+        if (is_admin()) {
+            if ($is_partner_caf_path) {
+                error_log('[SOS SSO] completion monitor skip reason=is_admin path=' . $request_path);
+            }
+            return;
+        }
+
+        if (wp_doing_ajax()) {
+            if ($is_partner_caf_path) {
+                error_log('[SOS SSO] completion monitor skip reason=wp_doing_ajax path=' . $request_path);
+            }
+            return;
+        }
+
+        if (!$is_page_request) {
+            if ($is_partner_caf_path) {
+                error_log('[SOS SSO] completion monitor skip reason=not_is_page path=' . $request_path . ' queried_object_id=' . $queried_post_id);
+            }
+            return;
+        }
+
+        $post_id = $queried_post_id;
+        if (!$post_id) {
+            if ($is_partner_caf_path) {
+                error_log('[SOS SSO] completion monitor skip reason=empty_post_id path=' . $request_path);
+            }
+            return;
+        }
+
+        if (!$this->is_partner_enabled_page_id($post_id)) {
+            if ($is_partner_caf_path) {
+                error_log('[SOS SSO] completion monitor skip reason=partner_page_not_enabled path=' . $request_path . ' post_id=' . $post_id . ' partner_enabled_meta=' . ($partner_enabled_meta !== '' ? $partner_enabled_meta : '(empty)'));
+            }
+            return;
+        }
+
+        $partner_id = $resolved_partner_id;
+        if (!$this->is_valid_partner_id($partner_id)) {
+            if ($is_partner_caf_path) {
+                error_log('[SOS SSO] completion monitor skip reason=invalid_partner_id path=' . $request_path . ' post_id=' . $post_id . ' resolved_partner_id=' . ($partner_id !== '' ? $partner_id : '(empty)'));
+            }
+            return;
+        }
+
+        $script_relative_path = 'assets/js/partner-completion-monitor.js';
+        $script_path = SOS_PG_DIR . $script_relative_path;
+        if (!is_readable($script_path)) {
+            if ($is_partner_caf_path) {
+                error_log('[SOS SSO] completion monitor skip reason=asset_not_readable path=' . $request_path . ' script_path=' . $script_path);
+            }
+            return;
+        }
+
+        if ($is_partner_caf_path) {
+            error_log('[SOS SSO] completion monitor enqueue path=' . $request_path . ' post_id=' . $post_id . ' partner_id=' . $partner_id . ' script_path=' . $script_path);
+        }
+
+        $script_url = plugin_dir_url(SOS_PG_FILE) . $script_relative_path;
+        $script_version = '2026-04-09-2';
+        wp_enqueue_script('sos-pg-partner-completion-monitor', $script_url, [], $script_version, true);
+        $current_user_id = get_current_user_id();
+        $flow_context = $current_user_id > 0
+            ? sanitize_key((string) get_user_meta($current_user_id, 'sos_pg_partner_flow_context', true))
+            : '';
+        $opener_origin = $current_user_id > 0
+            ? $this->sanitize_opener_origin((string) get_user_meta($current_user_id, 'sos_pg_partner_opener_origin', true))
+            : '';
+        $popup_partner_wordpress_flow = ($flow_context === 'partner_wordpress_popup');
+
+        if ($current_user_id > 0) {
+            // These values are single-flow hints for the current frontend monitor and must not leak into later flows.
+            delete_user_meta($current_user_id, 'sos_pg_partner_flow_context');
+            delete_user_meta($current_user_id, 'sos_pg_partner_opener_origin');
+        }
+
+        wp_add_inline_script(
+            'sos-pg-partner-completion-monitor',
+            'window.SOSPGCompletionMonitor=' . wp_json_encode([
+                'completionUrlEndpoint' => add_query_arg('sos_pg_completion_url', '1', home_url('/')),
+                'completionPageUrl' => home_url($this->current_completion_path() . '/'),
+                'completionReturnUrl' => $this->resolve_partner_configured_return_url($partner_id),
+                'partnerReturnUrl' => $this->resolve_partner_return_url($partner_id),
+                'openerOrigin' => $opener_origin,
+                'partnerId' => $partner_id,
+                // Popup partner WordPress must return through /partner-completion first.
+                'popupPartnerWordpressFlow' => $popup_partner_wordpress_flow,
+                'flowContext' => $flow_context,
+                'patchMarker' => 'completion-return-patch-hard-20260407-2',
+                'scriptVersion' => $script_version,
+                'source' => 'latepoint_success_monitor',
+            ]) . ';',
+            'before'
+        );
+    }
+
+    private function get_partner_completion_view_model($state_key, $return_url, array $args = []) {
+        $map = [
+            'booking_completed' => [
+                'title' => 'Prenotazione completata',
+                'message' => 'La prenotazione e stata completata correttamente.',
+            ],
+            'payment_pending' => [
+                'title' => 'Prenotazione creata, pagamento in attesa conferma partner',
+                'message' => 'La prenotazione e stata creata. Il pagamento risulta ancora in attesa di conferma dal partner.',
+            ],
+            'payment_recorded' => [
+                'title' => 'Pagamento registrato',
+                'message' => 'Il pagamento risulta registrato correttamente.',
+            ],
+            'unavailable' => [
+                'title' => 'Stato non disponibile',
+                'message' => 'Non e stato possibile determinare lo stato finale del flusso partner.',
+            ],
+        ];
+
+        $state = $map[$state_key] ?? $map['unavailable'];
+
+        return [
+            'state' => $state_key,
+            'title' => $state['title'],
+            'message' => $state['message'],
+            'return_url' => $return_url,
+            'button_label' => 'Torna al sito',
+            'booking_id' => (int) ($args['booking_id'] ?? 0),
+            'partner_id' => (string) ($args['partner_id'] ?? ''),
+            'phase' => (string) ($args['phase'] ?? ''),
+            'source' => (string) ($args['source'] ?? ''),
+            'opener_origin' => (string) ($args['opener_origin'] ?? ''),
+        ];
+    }
+
+    private function render_partner_completion_page(array $view) {
+        $payload = [
+            'type' => 'sos_partner_login_complete',
+            'legacyType' => 'sos_pg_completion',
+            'state' => (string) ($view['state'] ?? 'unavailable'),
+            'bookingId' => (int) ($view['booking_id'] ?? 0),
+            'partnerId' => (string) ($view['partner_id'] ?? ''),
+            'phase' => (string) ($view['phase'] ?? ''),
+            'source' => (string) ($view['source'] ?? ''),
+            'returnUrl' => (string) ($view['return_url'] ?? ''),
+        ];
+
+        nocache_headers();
+        status_header(200);
+        header('Content-Type: text/html; charset=' . get_bloginfo('charset'));
+
+        $title = 'Prenotazione completata';
+        $message = 'Stiamo tornando al sito del partner...';
+        $button_label = esc_html((string) ($view['button_label'] ?? 'Torna al sito'));
+        $return_url = esc_url((string) ($view['return_url'] ?? home_url('/')));
+        $state_class = esc_attr((string) ($view['state'] ?? 'unavailable'));
+        $payload_json = wp_json_encode($payload);
+        $return_origin = $this->sanitize_opener_origin((string) ($view['return_url'] ?? ''));
+        $requested_opener_origin = $this->sanitize_opener_origin((string) ($view['opener_origin'] ?? ''));
+        $current_site_origin = $this->sanitize_opener_origin(home_url('/'));
+        // Prefer the explicit opener origin transported through the popup flow.
+        $target_origin = $requested_opener_origin !== '' ? $requested_opener_origin : $return_origin;
+        if ($target_origin === $current_site_origin && $requested_opener_origin === '' && $return_origin !== '') {
+            $target_origin = $return_origin;
+        }
+        $origin_json = wp_json_encode($target_origin);
+        $requested_origin_json = wp_json_encode($requested_opener_origin);
+        $return_origin_json = wp_json_encode($return_origin);
+
+        echo '<!doctype html><html lang="it"><head><meta charset="' . esc_attr(get_bloginfo('charset')) . '"><meta name="viewport" content="width=device-width, initial-scale=1">';
+        echo '<title>' . $title . '</title>';
+        echo '<style>body{margin:0;font-family:Segoe UI,Arial,sans-serif;background:#f4f6f8;color:#1f2933}main{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}.sos-pg-completion{max-width:560px;width:100%;background:#fff;border:1px solid #d8dee4;border-radius:14px;padding:32px;box-shadow:0 10px 30px rgba(15,23,42,.08)}h1{margin:0 0 12px;font-size:28px;line-height:1.2}.sos-pg-state{display:inline-block;margin-bottom:16px;padding:6px 10px;border-radius:999px;font-size:12px;font-weight:600;background:#eef2f7;color:#334155;text-transform:uppercase;letter-spacing:.04em}p{margin:0 0 20px;font-size:16px;line-height:1.6}.sos-pg-actions{display:flex;gap:12px;flex-wrap:wrap}.sos-pg-button{display:inline-flex;align-items:center;justify-content:center;padding:12px 18px;border-radius:10px;background:#0f766e;color:#fff;text-decoration:none;font-weight:600}.sos-pg-note{margin-top:16px;color:#52606d;font-size:14px}.payment_pending .sos-pg-state{background:#fff7ed;color:#9a3412}.payment_recorded .sos-pg-state{background:#ecfdf3;color:#166534}.booking_completed .sos-pg-state{background:#eff6ff;color:#1d4ed8}.unavailable .sos-pg-state{background:#fef2f2;color:#b91c1c}</style>';
+        echo '</head><body><main><section class="sos-pg-completion ' . $state_class . '"><div class="sos-pg-state">Flusso partner</div><h1>' . esc_html($title) . '</h1><p>' . esc_html($message) . '</p><div class="sos-pg-actions"><a class="sos-pg-button" href="' . $return_url . '">' . $button_label . '</a></div><p id="sos-pg-completion-note" class="sos-pg-note">Se il ritorno automatico non parte, usa il pulsante per tornare al sito del partner.</p></section></main>';
+        echo '<script>(function(){var payload=' . $payload_json . ';var origin=' . $origin_json . ';var requestedOpenerOrigin=' . $requested_origin_json . ';var returnOrigin=' . $return_origin_json . ';var note=document.getElementById("sos-pg-completion-note");var returnUrl=String(payload.returnUrl||"");var redirected=false;function logMessage(message,details){if(window.console&&typeof window.console.log==="function"){if(typeof details!=="undefined"){window.console.log("[SOS SSO] "+message,details);return;}window.console.log("[SOS SSO] "+message);}}function redirectToPartner(trigger){if(redirected||!returnUrl){return;}redirected=true;logMessage("completion auto redirect",{trigger:trigger,returnUrl:returnUrl});window.location.assign(returnUrl);}logMessage("popup targetOrigin used",{targetOrigin:origin,requestedOpenerOrigin:requestedOpenerOrigin,returnOrigin:returnOrigin,returnUrl:returnUrl});if(window.opener&&origin){try{window.opener.postMessage(payload,origin);logMessage("completion postMessage sent",{targetOrigin:origin,returnUrl:returnUrl});}catch(error){logMessage("completion postMessage failed",String(error&&error.message?error.message:error));}}try{window.close();}catch(error){}window.setTimeout(function(){try{window.close();}catch(error){}},400);window.setTimeout(function(){if(note){note.textContent="Stiamo tornando al sito del partner...";}redirectToPartner("completion_fallback");},1200);}());</script>';
+        echo '</body></html>';
+        exit;
+    }
+
+    public function handle_partner_completion() {
+        $request_path = $this->normalize_local_path($this->current_request_path());
+        if ($request_path !== $this->normalize_local_path($this->current_completion_path())) {
+            return;
+        }
+
+        if (strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) !== 'GET') {
+            $this->render_partner_completion_page($this->get_partner_completion_view_model('unavailable', home_url('/'), [
+                'booking_id' => 0,
+                'partner_id' => '',
+                'phase' => '',
+                'source' => '',
+                'opener_origin' => '',
+            ]));
+        }
+
+        $booking_id = absint($_GET['booking_id'] ?? 0);
+        $requested_booking_id = $booking_id;
+        $completion_token = sanitize_text_field((string) ($_GET['completion_token'] ?? ''));
+        $partner_id_query = sanitize_text_field((string) ($_GET['partner_id'] ?? ''));
+        $phase = sanitize_key((string) ($_GET['phase'] ?? ''));
+        $external_reference = sanitize_text_field((string) ($_GET['external_reference'] ?? ''));
+        $opener_origin = $this->sanitize_opener_origin((string) ($_GET['opener_origin'] ?? ''));
+        $source = sanitize_key((string) ($_GET['source'] ?? ''));
+
+        if (!$this->is_valid_partner_id($partner_id_query)) {
+            $partner_id_query = '';
+        }
+
+        $state_key = 'unavailable';
+        $record_partner_id = $partner_id_query;
+        $record = null;
+        $final_completion_booking_id = $booking_id;
+        $is_caf_completion = ($this->normalize_partner_id_key($partner_id_query) === 'caf');
+
+        if ($is_caf_completion) {
+            error_log('[SOS SSO] COMPLETION_CAF_REQUEST ' . wp_json_encode([
+                'requested_booking_id' => $requested_booking_id,
+                'external_reference' => $external_reference,
+            ]));
+        }
+
+        if ($is_caf_completion && $external_reference !== '') {
+            $record = $this->get_partner_booking_record_by_external_reference($partner_id_query, $external_reference);
+            if ($record) {
+                error_log('[SOS SSO] COMPLETION_CAF_RECORD_FOUND ' . wp_json_encode([
+                    'requested_booking_id' => $requested_booking_id,
+                    'partner_record_id' => isset($record->id) ? absint($record->id) : 0,
+                    'lp_booking_id' => isset($record->lp_booking_id) ? absint($record->lp_booking_id) : 0,
+                    'external_reference' => $external_reference,
+                ]));
+                if ($booking_id <= 0 && isset($record->lp_booking_id) && absint($record->lp_booking_id) > 0) {
+                    $booking_id = absint($record->lp_booking_id);
+                    $final_completion_booking_id = $booking_id;
+                    error_log('[SOS SSO] COMPLETION_CAF_RESOLVED ' . wp_json_encode([
+                        'requested_booking_id' => $requested_booking_id,
+                        'partner_record_id' => isset($record->id) ? absint($record->id) : 0,
+                        'lp_booking_id' => isset($record->lp_booking_id) ? absint($record->lp_booking_id) : 0,
+                        'external_reference' => $external_reference,
+                        'final_booking_id_used' => $booking_id,
+                    ]));
+                }
+            }
+        }
+
+        if ($is_caf_completion && !$record && $booking_id > 0) {
+            $record = $this->get_partner_booking_record($booking_id);
+            if ($record) {
+                $record_partner_id = sanitize_text_field((string) ($record->partner_id ?? $record_partner_id));
+                error_log('[SOS SSO] COMPLETION_CAF_RECORD_FOUND ' . wp_json_encode([
+                    'requested_booking_id' => $requested_booking_id,
+                    'partner_record_id' => isset($record->id) ? absint($record->id) : 0,
+                    'lp_booking_id' => isset($record->lp_booking_id) ? absint($record->lp_booking_id) : 0,
+                    'external_reference' => $external_reference,
+                ]));
+            }
+        }
+
+        if ($booking_id > 0 && $completion_token !== '' && $this->verify_completion_token($completion_token, $booking_id, $partner_id_query)) {
+            if (!$record) {
+                $record = $this->get_partner_booking_record($booking_id);
+            }
+
+            if ($record) {
+                $record_partner_id = sanitize_text_field((string) ($record->partner_id ?? ''));
+                $partner_query_key = $this->normalize_partner_id_key($partner_id_query);
+                $record_partner_key = $this->normalize_partner_id_key($record_partner_id);
+                $session_partner_key = $this->normalize_partner_id_key($this->get_current_partner_id());
+                $record_external_reference = sanitize_text_field((string) ($record->payment_external_ref ?? ''));
+                $is_valid = true;
+
+                if (!$this->verify_completion_token($completion_token, $booking_id, $record_partner_id)) {
+                    $is_valid = false;
+                }
+
+                if ($partner_query_key !== '' && $record_partner_key !== '' && $partner_query_key !== $record_partner_key) {
+                    $is_valid = false;
+                }
+
+                if ($session_partner_key !== '' && $record_partner_key !== '' && $session_partner_key !== $record_partner_key) {
+                    $is_valid = false;
+                }
+
+                if ($external_reference !== '' && $record_external_reference !== '' && !hash_equals($record_external_reference, $external_reference)) {
+                    $is_valid = false;
+                }
+
+                if ($is_valid) {
+                    if ($this->should_use_partner_payment_completion_return($record_partner_id, $record)) {
+                        if (isset($record->lp_booking_id) && absint($record->lp_booking_id) > 0) {
+                            $final_completion_booking_id = absint($record->lp_booking_id);
+                            if ($this->normalize_partner_id_key($record_partner_id) === 'caf') {
+                                error_log('[SOS SSO] COMPLETION_CAF_RESOLVED ' . wp_json_encode([
+                                    'requested_booking_id' => $requested_booking_id,
+                                    'partner_record_id' => isset($record->id) ? absint($record->id) : 0,
+                                    'lp_booking_id' => isset($record->lp_booking_id) ? absint($record->lp_booking_id) : 0,
+                                    'external_reference' => $external_reference,
+                                    'final_booking_id_used' => $final_completion_booking_id,
+                                ]));
+                            }
+                        } else {
+                            if ($this->normalize_partner_id_key($record_partner_id) === 'caf') {
+                                error_log('[SOS SSO] COMPLETION_CAF_MISSING_BOOKING ' . wp_json_encode([
+                                    'requested_booking_id' => $requested_booking_id,
+                                    'partner_record_id' => isset($record->id) ? absint($record->id) : 0,
+                                    'lp_booking_id' => isset($record->lp_booking_id) ? absint($record->lp_booking_id) : 0,
+                                    'external_reference' => $external_reference,
+                                    'final_booking_id_used' => $final_completion_booking_id,
+                                ]));
+                            }
+                            error_log('[SOS SSO] FAKE_PAYMENT_COMPLETION_URL_WARN missing_lp_booking_id ' . wp_json_encode([
+                                'incoming_requested_booking_id' => $booking_id,
+                                'incoming_external_reference' => $external_reference,
+                                'partner_record_id' => isset($record->id) ? absint($record->id) : 0,
+                                'partner_record_lp_booking_id' => isset($record->lp_booking_id) ? absint($record->lp_booking_id) : 0,
+                                'final_booking_id_used' => $final_completion_booking_id,
+                                'final_external_reference_used' => $record_external_reference,
+                            ]));
+                        }
+                    }
+
+                    $partner_charge = isset($record->partner_charge) ? (float) $record->partner_charge : 0.0;
+                    $payment_status = sanitize_text_field((string) ($record->payment_status ?? ''));
+                    $confirmed_at = trim((string) ($record->confirmed_at ?? ''));
+
+                    if ($payment_status === 'paid' || $confirmed_at !== '') {
+                        $state_key = 'payment_recorded';
+                    } elseif ($partner_charge > 0) {
+                        $state_key = 'payment_pending';
+                    } else {
+                        $state_key = 'booking_completed';
+                    }
+                }
+            }
+        }
+
+        if ($is_caf_completion) {
+            $verified_lp_booking_id = ($record && isset($record->lp_booking_id)) ? absint($record->lp_booking_id) : 0;
+            if (!$record || $verified_lp_booking_id <= 0) {
+                error_log('[SOS SSO] COMPLETION_CAF_ABORT_NO_VERIFIED_RECORD ' . wp_json_encode([
+                    'requested_booking_id' => $requested_booking_id,
+                    'external_reference' => $external_reference,
+                    'partner_record_id' => $record && isset($record->id) ? absint($record->id) : 0,
+                    'lp_booking_id' => $verified_lp_booking_id,
+                    'reason' => !$record ? 'missing_record' : 'missing_lp_booking_id',
+                ]));
+                $abort_partner_id = $record_partner_id !== '' ? $record_partner_id : $partner_id_query;
+                $abort_url = $this->resolve_partner_completion_final_url($abort_partner_id);
+                $this->render_partner_completion_page($this->get_partner_completion_view_model('unavailable', $abort_url, [
+                    'booking_id' => 0,
+                    'partner_id' => $abort_partner_id,
+                    'phase' => $phase,
+                    'source' => $source,
+                    'opener_origin' => $opener_origin,
+                ]));
+                return;
+            }
+            $record_partner_id = sanitize_text_field((string) ($record->partner_id ?? $record_partner_id));
+            $final_completion_booking_id = $verified_lp_booking_id;
+        }
+
+        $return_url = $this->resolve_partner_completion_final_url($record_partner_id);
+        $return_url = $this->build_partner_payment_completion_return_url($return_url, $record_partner_id, $final_completion_booking_id, $record);
+        if ($this->normalize_partner_id_key($record_partner_id) === 'caf') {
+            error_log('[SOS SSO] COMPLETION_CAF_FINAL_URL ' . wp_json_encode([
+                'requested_booking_id' => $requested_booking_id,
+                'partner_record_id' => isset($record->id) ? absint($record->id) : 0,
+                'lp_booking_id' => isset($record->lp_booking_id) ? absint($record->lp_booking_id) : 0,
+                'external_reference' => $external_reference,
+                'final_booking_id_used' => $final_completion_booking_id,
+                'final_url' => $return_url,
+            ]));
+            // TEMP DEBUG CAF
+            error_log('[SOS SSO] COMPLETION_CAF_FINAL_URL_DEBUG ' . wp_json_encode([
+                'requested_booking_id' => $requested_booking_id,
+                'final_booking_id_used' => $final_completion_booking_id,
+                'external_reference' => $external_reference,
+                'partner_record_id' => isset($record->id) ? absint($record->id) : 0,
+                'lp_booking_id' => isset($record->lp_booking_id) ? absint($record->lp_booking_id) : 0,
+                'final_url' => $return_url,
+            ]));
+        }
+        error_log('[SOS SSO] completion return target final booking_id=' . $booking_id . ' partner_id=' . $record_partner_id . ' target=' . $return_url);
+
+        $this->render_partner_completion_page($this->get_partner_completion_view_model($state_key, $return_url, [
+            'booking_id' => $final_completion_booking_id,
+            'partner_id' => $record_partner_id,
+            'phase' => $phase,
+            'source' => $source,
+            'opener_origin' => $opener_origin,
+        ]));
+    }
+
+    public function handle_partner_completion_url_request() {
+        if (!isset($_GET['sos_pg_completion_url'])) {
+            return;
+        }
+
+        if (strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) !== 'GET') {
+            wp_send_json(['success' => false, 'message' => 'Metodo non consentito'], 405);
+        }
+
+        $booking_id = absint($_GET['booking_id'] ?? 0);
+        $requested_booking_id = $booking_id;
+
+        $partner_id_query = sanitize_text_field((string) ($_GET['partner_id'] ?? ''));
+        $external_reference = sanitize_text_field((string) ($_GET['external_reference'] ?? ''));
+        $phase = sanitize_key((string) ($_GET['phase'] ?? ''));
+        $source = sanitize_key((string) ($_GET['source'] ?? 'frontend'));
+        $opener_origin = $this->sanitize_opener_origin((string) ($_GET['opener_origin'] ?? ''));
+        $is_caf_completion = ($this->normalize_partner_id_key($partner_id_query) === 'caf');
+
+        if ($partner_id_query !== '' && !$this->is_valid_partner_id($partner_id_query)) {
+            wp_send_json(['success' => false, 'message' => 'partner_id non valido'], 400);
+        }
+
+        $record = null;
+        if ($is_caf_completion) {
+            error_log('[SOS SSO] COMPLETION_CAF_REQUEST ' . wp_json_encode([
+                'requested_booking_id' => $requested_booking_id,
+                'external_reference' => $external_reference,
+            ]));
+        }
+        if ($is_caf_completion && $external_reference !== '') {
+            $record = $this->get_partner_booking_record_by_external_reference($partner_id_query, $external_reference);
+            if ($record) {
+                error_log('[SOS SSO] COMPLETION_CAF_RECORD_FOUND ' . wp_json_encode([
+                    'requested_booking_id' => $requested_booking_id,
+                    'partner_record_id' => isset($record->id) ? absint($record->id) : 0,
+                    'lp_booking_id' => isset($record->lp_booking_id) ? absint($record->lp_booking_id) : 0,
+                    'external_reference' => $external_reference,
+                ]));
+                if ($booking_id <= 0 && isset($record->lp_booking_id) && absint($record->lp_booking_id) > 0) {
+                    $booking_id = absint($record->lp_booking_id);
+                }
+            }
+        }
+        if ($is_caf_completion && !$record && $booking_id > 0) {
+            $record = $this->get_partner_booking_record($booking_id);
+            if ($record) {
+                error_log('[SOS SSO] COMPLETION_CAF_RECORD_FOUND ' . wp_json_encode([
+                    'requested_booking_id' => $requested_booking_id,
+                    'partner_record_id' => isset($record->id) ? absint($record->id) : 0,
+                    'lp_booking_id' => isset($record->lp_booking_id) ? absint($record->lp_booking_id) : 0,
+                    'external_reference' => $external_reference,
+                ]));
+            }
+        }
+        if ($is_caf_completion) {
+            $verified_lp_booking_id = ($record && isset($record->lp_booking_id)) ? absint($record->lp_booking_id) : 0;
+            if (!$record || $verified_lp_booking_id <= 0) {
+                error_log('[SOS SSO] COMPLETION_CAF_ABORT_NO_VERIFIED_RECORD ' . wp_json_encode([
+                    'requested_booking_id' => $requested_booking_id,
+                    'external_reference' => $external_reference,
+                    'partner_record_id' => $record && isset($record->id) ? absint($record->id) : 0,
+                    'lp_booking_id' => $verified_lp_booking_id,
+                    'reason' => !$record ? 'missing_record' : 'missing_lp_booking_id',
+                ]));
+                wp_send_json(['success' => false, 'message' => 'record partner CAF non verificato'], 409);
+            }
+            $booking_id = $verified_lp_booking_id;
+        }
+        if ($booking_id <= 0) {
+            if ($this->normalize_partner_id_key($partner_id_query) === 'caf') {
+                error_log('[SOS SSO] COMPLETION_CAF_MISSING_BOOKING ' . wp_json_encode([
+                    'requested_booking_id' => $requested_booking_id,
+                    'partner_record_id' => isset($record->id) ? absint($record->id) : 0,
+                    'lp_booking_id' => isset($record->lp_booking_id) ? absint($record->lp_booking_id) : 0,
+                    'external_reference' => $external_reference,
+                    'final_booking_id_used' => $booking_id,
+                ]));
+            }
+            wp_send_json(['success' => false, 'message' => 'booking_id mancante'], 400);
+        }
+        if (!$record) {
+            $record = $this->get_partner_booking_record($booking_id);
+        }
+        if (!$record) {
+            if ($this->normalize_partner_id_key($partner_id_query) === 'caf') {
+                error_log('[SOS SSO] COMPLETION_CAF_MISSING_BOOKING ' . wp_json_encode([
+                    'requested_booking_id' => $requested_booking_id,
+                    'partner_record_id' => 0,
+                    'lp_booking_id' => 0,
+                    'external_reference' => $external_reference,
+                    'final_booking_id_used' => $booking_id,
+                ]));
+            }
+            wp_send_json(['success' => false, 'message' => 'record non trovato'], 404);
+        }
+
+        $record_partner_id = sanitize_text_field((string) ($record->partner_id ?? ''));
+        $record_partner_key = $this->normalize_partner_id_key($record_partner_id);
+        $partner_query_key = $this->normalize_partner_id_key($partner_id_query);
+        $session_partner_key = $this->normalize_partner_id_key($this->get_current_partner_id());
+        $record_external_reference = sanitize_text_field((string) ($record->payment_external_ref ?? ''));
+
+        if ($record_partner_key === '') {
+            wp_send_json(['success' => false, 'message' => 'partner record non valido'], 409);
+        }
+
+        if ($partner_query_key !== '' && $partner_query_key !== $record_partner_key) {
+            wp_send_json(['success' => false, 'message' => 'partner_id mismatch'], 403);
+        }
+
+        if ($session_partner_key === '' || $session_partner_key !== $record_partner_key) {
+            wp_send_json(['success' => false, 'message' => 'sessione partner non coerente'], 403);
+        }
+
+        if ($external_reference !== '' && $record_external_reference !== '' && !hash_equals($record_external_reference, $external_reference)) {
+            wp_send_json(['success' => false, 'message' => 'external_reference mismatch'], 409);
+        }
+
+        $resolved_booking_id = $booking_id;
+        if ($this->normalize_partner_id_key($record_partner_id) === 'caf') {
+            $resolved_booking_id = isset($record->lp_booking_id) ? absint($record->lp_booking_id) : 0;
+            if ($resolved_booking_id <= 0) {
+                error_log('[SOS SSO] COMPLETION_CAF_ABORT_NO_VERIFIED_RECORD ' . wp_json_encode([
+                    'requested_booking_id' => $requested_booking_id,
+                    'external_reference' => $external_reference,
+                    'partner_record_id' => isset($record->id) ? absint($record->id) : 0,
+                    'lp_booking_id' => isset($record->lp_booking_id) ? absint($record->lp_booking_id) : 0,
+                    'reason' => 'missing_lp_booking_id_after_record_validation',
+                ]));
+                wp_send_json(['success' => false, 'message' => 'record partner CAF non verificato'], 409);
+            }
+        } elseif ($this->should_use_partner_payment_completion_return($record_partner_id, $record)
+            && isset($record->lp_booking_id)
+            && absint($record->lp_booking_id) > 0
+        ) {
+            $resolved_booking_id = absint($record->lp_booking_id);
+        }
+        if ($this->normalize_partner_id_key($record_partner_id) === 'caf') {
+            error_log('[SOS SSO] COMPLETION_CAF_RESOLVED ' . wp_json_encode([
+                'requested_booking_id' => $requested_booking_id,
+                'partner_record_id' => isset($record->id) ? absint($record->id) : 0,
+                'lp_booking_id' => isset($record->lp_booking_id) ? absint($record->lp_booking_id) : 0,
+                'external_reference' => $external_reference,
+                'final_booking_id_used' => $resolved_booking_id,
+            ]));
+        }
+
+        $completion_url = $this->get_partner_completion_url($resolved_booking_id, [
+            'partner_id' => $record_partner_id,
+            'phase' => $phase,
+            'external_reference' => $external_reference,
+            'opener_origin' => $opener_origin,
+            'source' => $source,
+        ]);
+        if ($this->normalize_partner_id_key($record_partner_id) === 'caf') {
+            error_log('[SOS SSO] COMPLETION_CAF_FINAL_URL ' . wp_json_encode([
+                'requested_booking_id' => $requested_booking_id,
+                'partner_record_id' => isset($record->id) ? absint($record->id) : 0,
+                'lp_booking_id' => isset($record->lp_booking_id) ? absint($record->lp_booking_id) : 0,
+                'external_reference' => $external_reference,
+                'final_booking_id_used' => $resolved_booking_id,
+                'final_url' => $completion_url,
+            ]));
+            // TEMP DEBUG CAF
+            error_log('[SOS SSO] COMPLETION_CAF_FINAL_URL_DEBUG ' . wp_json_encode([
+                'requested_booking_id' => $requested_booking_id,
+                'final_booking_id_used' => $resolved_booking_id,
+                'external_reference' => $external_reference,
+                'partner_record_id' => isset($record->id) ? absint($record->id) : 0,
+                'lp_booking_id' => isset($record->lp_booking_id) ? absint($record->lp_booking_id) : 0,
+                'final_url' => $completion_url,
+            ]));
+        }
+
+        if ($this->should_use_partner_payment_completion_return($record_partner_id, $record)) {
+            error_log('[SOS SSO] FAKE_PAYMENT_COMPLETION_REQUEST ' . wp_json_encode([
+                'incoming_requested_booking_id' => $booking_id,
+                'incoming_external_reference' => $external_reference,
+                'partner_record_id' => isset($record->id) ? absint($record->id) : 0,
+                'partner_record_lp_booking_id' => isset($record->lp_booking_id) ? absint($record->lp_booking_id) : 0,
+                'final_booking_id_used' => $resolved_booking_id,
+                'final_external_reference_used' => $external_reference,
+                'final_fake_gateway_url' => $completion_url,
+            ]));
+            if (!isset($record->lp_booking_id) || absint($record->lp_booking_id) <= 0) {
+                error_log('[SOS SSO] FAKE_PAYMENT_COMPLETION_REQUEST_WARN missing_lp_booking_id ' . wp_json_encode([
+                    'incoming_requested_booking_id' => $booking_id,
+                    'incoming_external_reference' => $external_reference,
+                    'partner_record_id' => isset($record->id) ? absint($record->id) : 0,
+                    'partner_record_lp_booking_id' => isset($record->lp_booking_id) ? absint($record->lp_booking_id) : 0,
+                    'final_booking_id_used' => $resolved_booking_id,
+                    'final_external_reference_used' => $external_reference,
+                    'final_fake_gateway_url' => $completion_url,
+                ]));
+            }
+        }
+
+        if ($completion_url === '') {
+            wp_send_json(['success' => false, 'message' => 'completion url non disponibile'], 500);
+        }
+
+        wp_send_json_success([
+            'booking_id' => $resolved_booking_id,
+            'partner_id' => $record_partner_id,
+            'completion_url' => $completion_url,
+        ]);
     }
 
     private function get_partner_pages() {
@@ -986,6 +2630,7 @@ class SOS_PG_Plugin {
     }
 
     public function admin_menu() {
+
         if ($this->is_partner_mode()) {
             add_menu_page('SOS Partner Gateway', 'SOS Partner Gateway', 'manage_options', 'sos-partner-gateway', [$this, 'render_settings_page'], 'dashicons-shield', 58);
             add_submenu_page('sos-partner-gateway', 'Impostazioni', 'Impostazioni', 'manage_options', 'sos-partner-gateway', [$this, 'render_settings_page']);
@@ -999,6 +2644,7 @@ class SOS_PG_Plugin {
             add_submenu_page('sos-partner-gateway', 'Test pagamento', 'Test pagamento', 'manage_options', 'sos-partner-gateway-payment-test', [$this, 'render_test_payment_page']);
             add_submenu_page('sos-partner-gateway', 'Tester embedded booking', 'Tester embedded booking', 'manage_options', 'sos-partner-gateway-embedded-tester', [$this, 'render_embedded_booking_tester_page']);
         }
+
     }
 
     private function event_badge($event_type) {
@@ -1324,8 +2970,8 @@ class SOS_PG_Plugin {
             echo '</td></tr>';
 
             echo '<tr><th>Chiave privata ECC (PEM)</th><td>';
-            echo '<textarea class="large-text code" rows="10" name="self_login_private_key_pem" placeholder="-----BEGIN PRIVATE KEY-----">' . esc_textarea($settings['self_login_private_key_pem']) . '</textarea>';
-            echo '<p class="description">Chiave privata ECC per firmare le richieste di login. Deve corrispondere alla chiave pubblica configurata sul sito principale.</p>';
+            echo '<textarea class="large-text code" rows="10" name="self_login_private_key_pem" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>';
+            echo '<p class="description">Per sicurezza il valore salvato non viene mostrato. Inserisci una nuova chiave solo se vuoi aggiornarla; lasciando il campo vuoto il valore attuale resta invariato.</p>';
             echo '</td></tr>';
 
             echo '<tr><th colspan="2"><hr style="margin:4px 0;"><strong>Webhook in entrata (dal sito principale)</strong>';
@@ -1378,7 +3024,7 @@ class SOS_PG_Plugin {
             echo '<tr><th colspan="2"><hr style="margin:4px 0;"><strong>Shortcode [sos_partner_prenota] &mdash; uso self-service</strong><p class="description" style="font-weight:normal;">Usato quando vuoi inserire un pulsante &quot;Prenota&quot; direttamente su una pagina di questo sito senza un portale partner esterno. La chiave privata qui sotto firma la richiesta di login.</p></th></tr>';
             echo '<tr><th>Partner ID self-use</th><td><input type="text" class="regular-text" name="self_login_partner_id" value="' . esc_attr($settings['self_login_partner_id']) . '" placeholder="hf"><p class="description">Partner ID di default per lo shortcode quando non specificato nell\'attributo.</p></td></tr>';
             echo '<tr><th>URL endpoint login</th><td><input type="url" class="regular-text" name="self_login_endpoint_url" value="' . esc_attr($settings['self_login_endpoint_url']) . '" placeholder="https://videoconsulto.sospediatra.org/partner-login/"><p class="description">Lascia vuoto per usare l\'endpoint locale (<code>' . esc_html(home_url($this->current_endpoint_path() . '/')) . '</code>). Compila con l\'URL completo del sito principale se il plugin &egrave; installato su un sito partner separato.</p></td></tr>';
-            echo '<tr><th>Chiave privata self-use (PEM)</th><td><textarea class="large-text code" rows="10" name="self_login_private_key_pem" placeholder="-----BEGIN PRIVATE KEY-----">' . esc_textarea($settings['self_login_private_key_pem']) . '</textarea><p class="description">Chiave privata ECC per firmare le richieste generate dallo shortcode. <strong>Deve corrispondere alla chiave pubblica configurata sull\'endpoint di login.</strong></p></td></tr>';
+            echo '<tr><th>Chiave privata self-use (PEM)</th><td><textarea class="large-text code" rows="10" name="self_login_private_key_pem" placeholder="-----BEGIN PRIVATE KEY-----"></textarea><p class="description">Per sicurezza il valore salvato non viene mostrato. Inserisci una nuova chiave solo se vuoi aggiornarla; lasciando il campo vuoto il valore attuale resta invariato. <strong>La chiave deve corrispondere alla chiave pubblica configurata sull\'endpoint di login.</strong></p></td></tr>';
         }
 
         echo '</table>';
@@ -1436,118 +3082,341 @@ class SOS_PG_Plugin {
             $configs = [];
         }
 
-        // Aggiungi una riga vuota per inserimento rapido.
-        $configs[''] = [
-            'partner_id' => '',
-            'enabled' => true,
-            'type' => 'wordpress',
-            'integration_mode' => '',
-            'api_base_url' => '',
-            'api_key' => '',
-            'public_key_pem' => '',
-            'private_key_pem' => '',
-            'webhook_url' => '',
-            'webhook_secret' => '',
-            'callback_secret' => '',
-            'no_upfront_cost' => false,
-            'validation_token_strategy' => '',
-            'external_ref_mapping' => '',
-            'notes' => '',
-            'flags' => [],
-            'metadata' => [],
-        ];
+        $user_id = get_current_user_id();
+        $save_notice = get_transient('sos_pg_partner_configs_notice_' . $user_id);
+        if ($save_notice) {
+            delete_transient('sos_pg_partner_configs_notice_' . $user_id);
+        }
 
         echo '<div class="wrap">';
         echo '<h1>Partner multipli (beta)</h1>';
-        if (isset($_GET['msg']) && $_GET['msg'] === 'saved') {
-            echo '<div class="notice notice-success is-dismissible"><p>Configurazione salvata.</p></div>';
+
+        $global_notice_partner_id = is_array($save_notice) ? (string) ($save_notice['partner_id'] ?? '') : '';
+        if (!empty($save_notice['messages']) && is_array($save_notice['messages']) && $global_notice_partner_id === '') {
+            $global_notice_class = ($save_notice['type'] ?? '') === 'success' ? 'notice-success' : 'notice-error';
+            foreach ($save_notice['messages'] as $message) {
+                echo '<div class="notice ' . esc_attr($global_notice_class) . ' is-dismissible"><p>' . esc_html((string) $message) . '</p></div>';
+            }
         }
-        echo '<p>Nuovo layer di configurazione partner. Le impostazioni esistenti restano invariate.</p>';
+
+        echo '<p>Configurazione per-partner. Espandi un blocco per modificarlo. Il blocco <em>Nuovo partner</em> è sempre aperto per inserimento rapido.</p>';
 
         echo '<style>
-            .sos-pg-partner-table-wrapper { overflow-x: auto; margin-top: 12px; border: 1px solid #ccd0d4; background: #fff; }
-            .sos-pg-partner-table { border-collapse: collapse; min-width: 960px; width: 100%; }
-            .sos-pg-partner-table th { position: sticky; top: 0; background: #f6f7f7; z-index: 2; padding: 8px 10px; text-align: left; white-space: nowrap; }
-            .sos-pg-partner-table td { padding: 6px 8px; vertical-align: top; }
-            .sos-pg-partner-table input.regular-text { width: 100%; max-width: none; }
-            .sos-pg-partner-table textarea.large-text { width: 100%; box-sizing: border-box; min-height: 46px; }
-            .sos-pg-partner-table .sos-col-narrow { min-width: 80px; width: 90px; }
-            .sos-pg-partner-table .sos-col-medium { min-width: 140px; }
+            .sos-pg-partner-card { border: 1px solid #ccd0d4; background: #fff; margin-bottom: 12px; }
+            .sos-pg-partner-card > summary { padding: 9px 14px; cursor: pointer; font-weight: 600; font-size: 13px; background: #f6f7f7; list-style: none; display: flex; align-items: center; gap: 8px; }
+            .sos-pg-partner-card > summary:hover { background: #e8e8e8; }
+            .sos-pg-partner-card > summary::before { content: "▶"; font-size: 10px; transition: transform .15s; }
+            .sos-pg-partner-card[open] > summary::before { transform: rotate(90deg); }
+            .sos-pg-card-body { padding: 12px 18px 16px; }
+            .sos-pg-card-body table { width: 100%; border-collapse: collapse; }
+            .sos-pg-card-body th { width: 230px; text-align: left; padding: 6px 10px 6px 0; vertical-align: top; font-weight: 400; color: #3c434a; }
+            .sos-pg-card-body td { padding: 3px 0 8px 0; }
+            .sos-pg-card-body input.regular-text,
+            .sos-pg-card-body textarea.regular-text { width: 100%; max-width: 500px; box-sizing: border-box; }
+            .sos-field-note { color: #777; font-size: 11px; margin: 2px 0 0; }
+            .sos-nr-badge { display: none; background: #f0f0f1; border: 1px solid #c3c4c7; color: #888; font-size: 10px; padding: 1px 5px; border-radius: 8px; margin-left: 4px; font-weight: 400; }
+            .sos-field-not-relevant { opacity: 0.45; }
+            .sos-field-not-relevant .sos-nr-badge { display: inline; }
+            .sos-legacy-key-warn { background: #fff8e5; border-left: 3px solid #dba617; padding: 5px 9px; margin-top: 4px; font-size: 12px; }
+            .sos-pg-inline-notice { margin: 0 0 12px 0; padding: 10px 12px; border-left: 4px solid #d63638; background: #fff; }
+            .sos-pg-inline-notice.success { border-left-color: #00a32a; }
+            .sos-pg-path-status { display: inline-block; padding: 4px 8px; border-radius: 999px; background: #f0f6fc; color: #0f5132; font-size: 11px; font-weight: 600; }
+            .sos-pg-path-status.is-warning { background: #fff8e5; color: #8a5a00; }
+            .sos-pg-path-field { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+            .sos-pg-path-editor { width: 100%; }
+            .sos-pg-card-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding-top: 10px; border-top: 1px solid #f0f0f1; margin-top: 8px; }
         </style>';
 
-        echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
-        wp_nonce_field('sos_pg_save_partner_configs');
-        echo '<input type="hidden" name="action" value="sos_pg_save_partner_configs" />';
+        echo '<script>
+        (function(){
+            var relevance = {
+                api_base_url:              ["external_api"],
+                api_key:                   ["external_api"],
+                public_key_pem:            ["embedded_booking"],
+                private_key_path:          ["embedded_booking"],
+                webhook_secret:            ["wordpress","external_api"],
+                callback_secret:           ["external_api","embedded_booking"],
+                validation_token_strategy: ["embedded_booking"],
+                external_ref_mapping:      ["embedded_booking"]
+            };
+            window.sosPgUpdateType = function(sel, idx) {
+                var type  = sel.value;
+                var card  = document.getElementById("sos-pg-card-" + idx);
+                if (!card) return;
+                card.querySelectorAll("tr[data-field]").forEach(function(row) {
+                    var field = row.getAttribute("data-field");
+                    var rel   = relevance[field];
+                    if (!rel || rel.indexOf(type) >= 0) {
+                        row.classList.remove("sos-field-not-relevant");
+                    } else {
+                        row.classList.add("sos-field-not-relevant");
+                    }
+                });
+            };
+            window.sosPgEnablePathEdit = function(button) {
+                var wrapper = button.closest(".sos-pg-path-field");
+                if (!wrapper) return;
+                var status = wrapper.querySelector(".sos-pg-path-readonly");
+                var editor = wrapper.querySelector(".sos-pg-path-editor");
+                var retain = wrapper.querySelector("input[type=\"hidden\"][name=\"partner[retain_private_key_path]\"]");
+                if (status) status.style.display = "none";
+                if (editor) editor.style.display = "block";
+                if (retain) retain.value = "0";
+                button.style.display = "none";
+                if (editor) {
+                    var input = editor.querySelector("input");
+                    if (input) input.focus();
+                }
+            };
+        })();
+        </script>';
 
-        echo '<div class="sos-pg-partner-table-wrapper">';
-        echo '<table class="widefat fixed striped sos-pg-partner-table">';
-        echo '<thead><tr>';
-        $cols = [
-            'Partner ID', 'Abilitato', 'Tipo', 'Integration mode', 'API base URL', 'API key',
-            'Public key PEM', 'Private key PEM', 'Webhook URL', 'Webhook secret', 'Callback secret',
-            'No upfront cost', 'Validation token strategy', 'External ref mapping', 'Note', 'Flags (JSON)', 'Metadata (JSON)'
+        // Mappa di rilevanza per classe CSS iniziale (calcolata server-side).
+        $relevance_map = [
+            'api_base_url'              => ['external_api'],
+            'api_key'                   => ['external_api'],
+            'public_key_pem'            => ['embedded_booking'],
+            'private_key_path'          => ['embedded_booking'],
+            'webhook_secret'            => ['wordpress', 'external_api'],
+            'callback_secret'           => ['external_api', 'embedded_booking'],
+            'validation_token_strategy' => ['embedded_booking'],
+            'external_ref_mapping'      => ['embedded_booking'],
         ];
-        foreach ($cols as $col) {
-            echo '<th>' . esc_html($col) . '</th>';
-        }
-        echo '</tr></thead><tbody>';
+
+        $nr_class = function($field, $type) use ($relevance_map) {
+            if (!isset($relevance_map[$field])) return '';
+            return in_array($type, $relevance_map[$field], true) ? '' : ' sos-field-not-relevant';
+        };
+
+        // Aggiungi riga vuota per nuovo inserimento.
+        $all_configs = $configs;
+        $all_configs[''] = [
+            'partner_id' => '', 'enabled' => true, 'type' => 'wordpress',
+            'integration_mode' => '', 'completion_return_url' => '', 'api_base_url' => '', 'api_key' => '',
+            'public_key_pem' => '', 'private_key_path' => '', 'private_key_pem' => '',
+            'webhook_url' => '', 'webhook_secret' => '', 'callback_secret' => '',
+            'no_upfront_cost' => false, 'validation_token_strategy' => '',
+            'external_ref_mapping' => '', 'notes' => '', 'flags' => [], 'metadata' => [],
+        ];
 
         $index = 0;
-        foreach ($configs as $pid => $cfg) {
-            $pid_val = $pid !== '' ? $pid : '';
-            $enabled = !empty($cfg['enabled']);
-            $type = isset($cfg['type']) ? $cfg['type'] : 'wordpress';
-            $integration_mode = isset($cfg['integration_mode']) ? $cfg['integration_mode'] : '';
-            $api_base_url = isset($cfg['api_base_url']) ? $cfg['api_base_url'] : '';
-            $api_key = isset($cfg['api_key']) ? $cfg['api_key'] : '';
-            $public_key_pem = isset($cfg['public_key_pem']) ? $cfg['public_key_pem'] : '';
-            $private_key_pem = isset($cfg['private_key_pem']) ? $cfg['private_key_pem'] : '';
-            $webhook_url = isset($cfg['webhook_url']) ? $cfg['webhook_url'] : '';
-            $webhook_secret = isset($cfg['webhook_secret']) ? $cfg['webhook_secret'] : '';
-            $callback_secret = isset($cfg['callback_secret']) ? $cfg['callback_secret'] : '';
-            $no_upfront_cost = !empty($cfg['no_upfront_cost']);
-            $validation_token_strategy = isset($cfg['validation_token_strategy']) ? $cfg['validation_token_strategy'] : '';
-            $external_ref_mapping = isset($cfg['external_ref_mapping']) ? $cfg['external_ref_mapping'] : '';
-            $notes = isset($cfg['notes']) ? $cfg['notes'] : '';
-            $flags = isset($cfg['flags']) ? $cfg['flags'] : [];
-            $metadata = isset($cfg['metadata']) ? $cfg['metadata'] : [];
+        foreach ($all_configs as $pid => $cfg) {
+            $is_new    = ($pid === '');
+            $pid_val   = $is_new ? '' : (string) $pid;
+            $enabled   = !empty($cfg['enabled']);
+            $type      = sanitize_text_field((string) ($cfg['type'] ?? 'wordpress'));
+            $int_mode  = (string) ($cfg['integration_mode'] ?? '');
+            $completion_return_url = (string) ($cfg['completion_return_url'] ?? '');
+            $api_url   = (string) ($cfg['api_base_url'] ?? '');
+            $api_key   = (string) ($cfg['api_key'] ?? '');
+            $pub_pem   = (string) ($cfg['public_key_pem'] ?? '');
+            $pk_path   = (string) ($cfg['private_key_path'] ?? '');
+            $has_leg   = trim((string) ($cfg['private_key_pem'] ?? '')) !== '';
+            $wh_url    = (string) ($cfg['webhook_url'] ?? '');
+            $wh_sec    = (string) ($cfg['webhook_secret'] ?? '');
+            $cb_sec    = (string) ($cfg['callback_secret'] ?? '');
+            $no_up     = !empty($cfg['no_upfront_cost']);
+            $vts       = (string) ($cfg['validation_token_strategy'] ?? '');
+            $ext_ref   = (string) ($cfg['external_ref_mapping'] ?? '');
+            $notes     = (string) ($cfg['notes'] ?? '');
+            $flags     = isset($cfg['flags']) && is_array($cfg['flags']) ? $cfg['flags'] : [];
+            $metadata  = isset($cfg['metadata']) && is_array($cfg['metadata']) ? $cfg['metadata'] : [];
+            $flags_j   = wp_json_encode($flags);
+            $meta_j    = wp_json_encode($metadata);
 
-            $flags_json = is_array($flags) ? wp_json_encode($flags) : (string) $flags;
-            $metadata_json = is_array($metadata) ? wp_json_encode($metadata) : (string) $metadata;
+            $i      = esc_attr($index);
+            $i_js   = esc_js((string) $index);
+            $open   = $is_new ? 'open' : '';
+            $title  = $is_new
+                ? '+ Nuovo partner'
+                : esc_html($pid_val) . ' &nbsp;<span style="font-weight:400;color:#666;">[' . esc_html($type) . ']' . ($enabled ? '' : ' — disabilitato') . '</span>';
 
-            $pid_readonly = $pid_val !== '' ? 'readonly' : '';
+            $notice_partner_id = is_array($save_notice) ? (string) ($save_notice['partner_id'] ?? '') : '';
+            $show_inline_notice = !empty($save_notice['messages'])
+                && is_array($save_notice['messages'])
+                && ($notice_partner_id === $pid_val || ($is_new && $notice_partner_id === '__new__'));
 
-            echo '<tr>';
-            echo '<td class="sos-col-medium"><input type="text" name="partners[' . esc_attr($index) . '][partner_id]" value="' . esc_attr($pid_val) . '" class="regular-text" ' . $pid_readonly . ' /></td>';
-            echo '<td class="sos-col-narrow"><label><input type="checkbox" name="partners[' . esc_attr($index) . '][enabled]" value="1" ' . checked($enabled, true, false) . ' /> abilitato</label></td>';
-            echo '<td class="sos-col-medium"><select name="partners[' . esc_attr($index) . '][type]">';
+            $pk_label = '';
+            $pk_status_class = 'sos-pg-path-status';
+            if ($pk_path !== '') {
+                $pk_basename = basename(str_replace('\\', '/', $pk_path));
+                $pk_is_valid = false;
+                $pk_real = realpath($pk_path);
+                if ($pk_real !== false && is_file($pk_real) && is_readable($pk_real)) {
+                    $pk_is_valid = true;
+                }
+                $pk_label = $pk_is_valid
+                    ? 'File chiave configurato · Percorso valido · ' . $pk_basename
+                    : 'File chiave configurato · Percorso da verificare · ' . $pk_basename;
+                if (!$pk_is_valid) {
+                    $pk_status_class .= ' is-warning';
+                }
+            }
+
+            echo '<details class="sos-pg-partner-card" id="sos-pg-card-' . $i . '" ' . $open . '>';
+            echo '<summary>' . $title . '</summary>';
+            echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+            wp_nonce_field('sos_pg_save_partner_configs');
+            echo '<input type="hidden" name="action" value="sos_pg_save_partner_configs" />';
+            echo '<input type="hidden" name="original_partner_id" value="' . esc_attr($pid_val) . '" />';
+            echo '<div class="sos-pg-card-body"><table>';
+
+            if ($show_inline_notice) {
+                $inline_notice_class = ($save_notice['type'] ?? '') === 'success' ? 'sos-pg-inline-notice success' : 'sos-pg-inline-notice';
+                echo '<tr><td colspan="2"><div class="' . esc_attr($inline_notice_class) . '">';
+                foreach ($save_notice['messages'] as $message) {
+                    echo '<div>' . esc_html((string) $message) . '</div>';
+                }
+                echo '</div></td></tr>';
+            }
+
+            // Partner ID
+            echo '<tr data-field="partner_id"><th><label>Partner ID</label></th><td>';
+            if ($is_new) {
+                echo '<input type="text" name="partner[partner_id]" value="" class="regular-text" placeholder="es. partner-abc" />';
+                echo '<p class="sos-field-note">Identificatore univoco. Non modificabile dopo il primo salvataggio.</p>';
+            } else {
+                echo '<input type="text" name="partner[partner_id]" value="' . esc_attr($pid_val) . '" class="regular-text" readonly />';
+            }
+            echo '</td></tr>';
+
+            // Abilitato + Tipo
+            echo '<tr data-field="enabled_type"><th>Abilitato / Tipo</th><td>';
+            echo '<label><input type="checkbox" name="partner[enabled]" value="1" ' . checked($enabled, true, false) . ' /> abilitato</label> &nbsp;';
+            echo '<select name="partner[type]" onchange="sosPgUpdateType(this, \'' . $i_js . '\')">';
             foreach (['wordpress', 'external_api', 'embedded_booking'] as $opt) {
                 echo '<option value="' . esc_attr($opt) . '" ' . selected($type, $opt, false) . '>' . esc_html($opt) . '</option>';
             }
-            echo '</select></td>';
-            echo '<td class="sos-col-medium"><input type="text" name="partners[' . esc_attr($index) . '][integration_mode]" value="' . esc_attr($integration_mode) . '" class="regular-text" /></td>';
-            echo '<td class="sos-col-medium"><input type="text" name="partners[' . esc_attr($index) . '][api_base_url]" value="' . esc_attr($api_base_url) . '" class="regular-text" /></td>';
-            echo '<td class="sos-col-medium"><input type="text" name="partners[' . esc_attr($index) . '][api_key]" value="' . esc_attr($api_key) . '" class="regular-text" /></td>';
-            echo '<td><textarea name="partners[' . esc_attr($index) . '][public_key_pem]" rows="2" class="large-text">' . esc_textarea($public_key_pem) . '</textarea></td>';
-            echo '<td><textarea name="partners[' . esc_attr($index) . '][private_key_pem]" rows="2" class="large-text">' . esc_textarea($private_key_pem) . '</textarea></td>';
-            echo '<td class="sos-col-medium"><input type="text" name="partners[' . esc_attr($index) . '][webhook_url]" value="' . esc_attr($webhook_url) . '" class="regular-text" /></td>';
-            echo '<td class="sos-col-medium"><input type="text" name="partners[' . esc_attr($index) . '][webhook_secret]" value="' . esc_attr($webhook_secret) . '" class="regular-text" /></td>';
-            echo '<td class="sos-col-medium"><input type="text" name="partners[' . esc_attr($index) . '][callback_secret]" value="' . esc_attr($callback_secret) . '" class="regular-text" /></td>';
-            echo '<td class="sos-col-narrow"><label><input type="checkbox" name="partners[' . esc_attr($index) . '][no_upfront_cost]" value="1" ' . checked($no_upfront_cost, true, false) . ' /> sì</label></td>';
-            echo '<td class="sos-col-medium"><input type="text" name="partners[' . esc_attr($index) . '][validation_token_strategy]" value="' . esc_attr($validation_token_strategy) . '" class="regular-text" placeholder="es. bearer_token" /></td>';
-            echo '<td class="sos-col-medium"><input type="text" name="partners[' . esc_attr($index) . '][external_ref_mapping]" value="' . esc_attr($external_ref_mapping) . '" class="regular-text" placeholder="es. booking_id" /></td>';
-            echo '<td><textarea name="partners[' . esc_attr($index) . '][notes]" rows="2" class="large-text">' . esc_textarea($notes) . '</textarea></td>';
-            echo '<td><textarea name="partners[' . esc_attr($index) . '][flags]" rows="2" class="large-text" placeholder="JSON">' . esc_textarea($flags_json) . '</textarea></td>';
-            echo '<td><textarea name="partners[' . esc_attr($index) . '][metadata]" rows="2" class="large-text" placeholder="JSON">' . esc_textarea($metadata_json) . '</textarea></td>';
-            echo '</tr>';
+            echo '</select>';
+            echo '<p class="sos-field-note"><b>wordpress</b>: login WP + webhook. &nbsp;<b>external_api</b>: REST API esterna. &nbsp;<b>embedded_booking</b>: widget booking con firma ECC.</p>';
+            echo '</td></tr>';
+
+            // Integration mode
+            echo '<tr data-field="integration_mode"><th>Integration mode</th><td>';
+            echo '<input type="text" name="partner[integration_mode]" value="' . esc_attr($int_mode) . '" class="regular-text" placeholder="es. login_redirect" />';
+            echo '</td></tr>';
+
+            echo '<tr data-field="completion_return_url"><th>Completion return URL</th><td>';
+            echo '<input type="text" name="partner[completion_return_url]" value="' . esc_attr($completion_return_url) . '" class="regular-text" placeholder="https://partner.example.it/ritorno-finale" />';
+            echo '<p class="sos-field-note">URL assoluta usata come destinazione primaria del ritorno finale dalla completion page.</p>';
+            echo '</td></tr>';
+
+            // API base URL
+            echo '<tr data-field="api_base_url" class="' . $nr_class('api_base_url', $type) . '"><th>';
+            echo 'API base URL <span class="sos-nr-badge">non richiesto per questo tipo</span></th><td>';
+            echo '<input type="text" name="partner[api_base_url]" value="' . esc_attr($api_url) . '" class="regular-text" placeholder="https://..." />';
+            echo '<p class="sos-field-note">Solo external_api: URL base delle API del partner.</p>';
+            echo '</td></tr>';
+
+            // API key
+            echo '<tr data-field="api_key" class="' . $nr_class('api_key', $type) . '"><th>';
+            echo 'API key <span class="sos-nr-badge">non richiesto per questo tipo</span></th><td>';
+            echo '<input type="text" name="partner[api_key]" value="' . esc_attr($api_key) . '" class="regular-text" />';
+            echo '</td></tr>';
+
+            // Public key PEM
+            echo '<tr data-field="public_key_pem" class="' . $nr_class('public_key_pem', $type) . '"><th>';
+            echo 'Public key PEM <span class="sos-nr-badge">non richiesto per questo tipo</span></th><td>';
+            echo '<textarea name="partner[public_key_pem]" rows="3" class="regular-text">' . esc_textarea($pub_pem) . '</textarea>';
+            echo '<p class="sos-field-note">Chiave pubblica ECC del partner (formato PEM). Usata per verificare le firme embedded_booking.</p>';
+            echo '</td></tr>';
+
+            // Private key path
+            echo '<tr data-field="private_key_path" class="' . $nr_class('private_key_path', $type) . '"><th>';
+            echo 'Private key path <span class="sos-nr-badge">non richiesto per questo tipo</span></th><td>';
+            echo '<div class="sos-pg-path-field">';
+            if (!$is_new && $pk_path !== '') {
+                echo '<input type="hidden" name="partner[retain_private_key_path]" value="1" />';
+                echo '<div class="sos-pg-path-readonly">';
+                echo '<span class="' . esc_attr($pk_status_class) . '">' . esc_html($pk_label) . '</span>';
+                echo ' <button type="button" class="button button-secondary button-small" onclick="sosPgEnablePathEdit(this)">Modifica percorso</button>';
+                echo '</div>';
+                echo '<div class="sos-pg-path-editor" style="display:none;">';
+                echo '<input type="text" name="partner[private_key_path]" value="" class="regular-text" placeholder="/percorso/assoluto/private.pem" />';
+                echo '</div>';
+            } else {
+                echo '<input type="hidden" name="partner[retain_private_key_path]" value="0" />';
+                echo '<div class="sos-pg-path-editor">';
+                echo '<input type="text" name="partner[private_key_path]" value="" class="regular-text" placeholder="/percorso/assoluto/private.pem" />';
+                echo '</div>';
+            }
+            echo '</div>';
+            echo '<p class="sos-field-note">Percorso assoluto al file PEM della chiave privata sul filesystem del server. Dopo il salvataggio il path completo non viene più mostrato in chiaro.</p>';
+            if ($has_leg) {
+                echo '<div class="sos-legacy-key-warn">&#9888; Config legacy: chiave privata ancora salvata nel database. Imposta <em>Private key path</em> e salva per migrare alla lettura da file.</div>';
+            }
+            echo '</td></tr>';
+
+            // Webhook URL
+            echo '<tr data-field="webhook_url"><th>Webhook URL</th><td>';
+            echo '<input type="text" name="partner[webhook_url]" value="' . esc_attr($wh_url) . '" class="regular-text" placeholder="https://..." />';
+            echo '<p class="sos-field-note">URL dove il plugin invia le notifiche evento al sistema del partner.</p>';
+            echo '</td></tr>';
+
+            // Webhook secret
+            echo '<tr data-field="webhook_secret" class="' . $nr_class('webhook_secret', $type) . '"><th>';
+            echo 'Webhook secret <span class="sos-nr-badge">non richiesto per questo tipo</span></th><td>';
+            echo '<input type="text" name="partner[webhook_secret]" value="' . esc_attr($wh_sec) . '" class="regular-text" />';
+            echo '<p class="sos-field-note">Secret HMAC condiviso per firmare le notifiche webhook in uscita.</p>';
+            echo '</td></tr>';
+
+            // Callback secret
+            echo '<tr data-field="callback_secret" class="' . $nr_class('callback_secret', $type) . '"><th>';
+            echo 'Callback secret <span class="sos-nr-badge">non richiesto per questo tipo</span></th><td>';
+            echo '<input type="text" name="partner[callback_secret]" value="' . esc_attr($cb_sec) . '" class="regular-text" />';
+            echo '<p class="sos-field-note">Secret usato dal partner per firmare le callback di pagamento in arrivo.</p>';
+            echo '</td></tr>';
+
+            // No upfront cost
+            echo '<tr data-field="no_upfront_cost"><th>No upfront cost</th><td>';
+            echo '<label><input type="checkbox" name="partner[no_upfront_cost]" value="1" ' . checked($no_up, true, false) . ' /> pagamento gestito dal partner</label>';
+            echo '<p class="sos-field-note">Alias compatibile del flag storico <strong>no_upfront_cost</strong>: quando attivo il gateway non incassa upfront e il pagamento resta a carico del partner.</p>';
+            echo '</td></tr>';
+
+            // Validation token strategy
+            echo '<tr data-field="validation_token_strategy" class="' . $nr_class('validation_token_strategy', $type) . '"><th>';
+            echo 'Validation token strategy <span class="sos-nr-badge">non richiesto per questo tipo</span></th><td>';
+            echo '<input type="text" name="partner[validation_token_strategy]" value="' . esc_attr($vts) . '" class="regular-text" placeholder="es. bearer_token" />';
+            echo '<p class="sos-field-note">Solo embedded_booking: modalità di validazione del token nella richiesta.</p>';
+            echo '</td></tr>';
+
+            // External ref mapping
+            echo '<tr data-field="external_ref_mapping" class="' . $nr_class('external_ref_mapping', $type) . '"><th>';
+            echo 'External ref mapping <span class="sos-nr-badge">non richiesto per questo tipo</span></th><td>';
+            echo '<input type="text" name="partner[external_ref_mapping]" value="' . esc_attr($ext_ref) . '" class="regular-text" placeholder="es. booking_id" />';
+            echo '<p class="sos-field-note">Chiave usata per collegare e riconciliare callback pagamento, booking interni e riferimenti esterni del partner.</p>';
+            echo '</td></tr>';
+
+            // Note
+            echo '<tr data-field="notes"><th>Note</th><td>';
+            echo '<textarea name="partner[notes]" rows="2" class="regular-text">' . esc_textarea($notes) . '</textarea>';
+            echo '</td></tr>';
+
+            // Flags
+            echo '<tr data-field="flags"><th>Flags (JSON)</th><td>';
+            echo '<textarea name="partner[flags]" rows="2" class="regular-text" placeholder="[]">' . esc_textarea($flags_j) . '</textarea>';
+            echo '<p class="sos-field-note">Array JSON di flag o opzioni partner-specifiche usate per attivare comportamenti configurabili senza cambiare la semantica del partner.</p>';
+            echo '</td></tr>';
+
+            // Metadata
+            echo '<tr data-field="metadata"><th>Metadata (JSON)</th><td>';
+            echo '<textarea name="partner[metadata]" rows="2" class="regular-text" placeholder="{}">' . esc_textarea($meta_j) . '</textarea>';
+            echo '<p class="sos-field-note">Oggetto JSON con dati extra strutturati del partner, utile per memorizzare attributi aggiuntivi senza introdurre nuovi campi dedicati.</p>';
+            echo '</td></tr>';
+
+            echo '</table>';
+            echo '<div class="sos-pg-card-actions">';
+            echo '<button type="submit" name="partner_action" value="save" class="button button-primary">Salva partner</button>';
+            if (!$is_new) {
+                echo '<button type="submit" name="partner_action" value="delete" class="button button-secondary" onclick="return window.confirm(\'Eliminare il partner ' . esc_js($pid_val) . '? Questa azione rimuove solo questa configurazione.\')">Elimina partner</button>';
+            }
+            echo '</div>';
+            echo '</div>';
+            echo '</form>';
+            echo '</details>';
 
             $index++;
         }
-
-        echo '</tbody></table>';
-        echo '</div>';
-        echo '<p class="submit"><button class="button button-primary">Salva configurazione</button></p>';
-        echo '</form>';
         echo '</div>';
     }
 
@@ -1558,51 +3427,156 @@ class SOS_PG_Plugin {
 
         check_admin_referer('sos_pg_save_partner_configs');
 
-        $partners = isset($_POST['partners']) && is_array($_POST['partners']) ? $_POST['partners'] : [];
-        $clean = [];
-
-        foreach ($partners as $entry) {
-            $partner_id = sanitize_text_field($entry['partner_id'] ?? '');
-            if ($partner_id === '') {
-                continue;
-            }
-
-            $type = sanitize_text_field($entry['type'] ?? 'wordpress');
-            if (!in_array($type, ['wordpress', 'external_api', 'embedded_booking'], true)) {
-                $type = 'wordpress';
-            }
-
-            $cfg = [
-                'partner_id' => $partner_id,
-                'enabled' => !empty($entry['enabled']),
-                'type' => $type,
-                'integration_mode' => sanitize_text_field($entry['integration_mode'] ?? ''),
-                'api_base_url' => esc_url_raw($entry['api_base_url'] ?? ''),
-                'api_key' => (string) ($entry['api_key'] ?? ''),
-                'public_key_pem' => (string) ($entry['public_key_pem'] ?? ''),
-                'private_key_pem' => (string) ($entry['private_key_pem'] ?? ''),
-                'webhook_url' => esc_url_raw($entry['webhook_url'] ?? ''),
-                'webhook_secret' => (string) ($entry['webhook_secret'] ?? ''),
-                'callback_secret' => (string) ($entry['callback_secret'] ?? ''),
-                'validation_token_strategy' => sanitize_text_field($entry['validation_token_strategy'] ?? ''),
-                'external_ref_mapping' => sanitize_text_field($entry['external_ref_mapping'] ?? ''),
-                'no_upfront_cost' => !empty($entry['no_upfront_cost']),
-                'notes' => sanitize_textarea_field($entry['notes'] ?? ''),
-            ];
-
-            $flags_raw = isset($entry['flags']) ? (string) $entry['flags'] : '';
-            $metadata_raw = isset($entry['metadata']) ? (string) $entry['metadata'] : '';
-
-            $cfg['flags'] = $this->parse_json_array_or_csv_list($flags_raw);
-            $cfg['metadata'] = $this->parse_json_struct_or_empty($metadata_raw);
-
-            $clean[$partner_id] = $cfg;
+        $existing_configs = $this->settings_helper->get_partner_configs_option();
+        if (!is_array($existing_configs)) {
+            $existing_configs = [];
         }
 
-        update_option($this->settings_helper->get_partner_configs_key(), $clean, false);
+        $entry = isset($_POST['partner']) && is_array($_POST['partner']) ? $_POST['partner'] : [];
+        $original_partner_id = sanitize_text_field((string) ($_POST['original_partner_id'] ?? ''));
+        $partner_action = sanitize_key((string) ($_POST['partner_action'] ?? 'save'));
 
-        wp_safe_redirect(admin_url('admin.php?page=sos-partner-gateway-partners&msg=saved'));
+        if ($partner_action === 'delete') {
+            if ($original_partner_id === '' || !isset($existing_configs[$original_partner_id])) {
+                $this->set_partner_configs_notice('error', ['Partner non trovato: eliminazione non eseguita.']);
+                wp_safe_redirect(admin_url('admin.php?page=sos-partner-gateway-partners'));
+                exit;
+            }
+
+            unset($existing_configs[$original_partner_id]);
+            update_option($this->settings_helper->get_partner_configs_key(), $existing_configs, false);
+            $this->set_partner_configs_notice('success', ['Partner "' . $original_partner_id . '" eliminato.']);
+            wp_safe_redirect(admin_url('admin.php?page=sos-partner-gateway-partners'));
+            exit;
+        }
+
+        $target_partner_id = $original_partner_id !== '' ? $original_partner_id : sanitize_text_field((string) ($entry['partner_id'] ?? ''));
+        $existing_cfg = isset($existing_configs[$target_partner_id]) && is_array($existing_configs[$target_partner_id])
+            ? $existing_configs[$target_partner_id]
+            : [];
+
+        $build = $this->build_partner_config_from_entry($entry, $existing_cfg, $target_partner_id);
+        if (!empty($build['errors'])) {
+            $notice_partner_id = $build['partner_id'] !== '' ? $build['partner_id'] : '__new__';
+            $this->set_partner_configs_notice('error', $build['errors'], $notice_partner_id);
+            wp_safe_redirect(admin_url('admin.php?page=sos-partner-gateway-partners'));
+            exit;
+        }
+
+        $existing_configs[$build['partner_id']] = $build['config'];
+        update_option($this->settings_helper->get_partner_configs_key(), $existing_configs, false);
+
+        $this->set_partner_configs_notice('success', ['Partner "' . $build['partner_id'] . '" salvato.'], $build['partner_id']);
+        wp_safe_redirect(admin_url('admin.php?page=sos-partner-gateway-partners'));
         exit;
+    }
+
+    private function set_partner_configs_notice($type, array $messages, $partner_id = '') {
+        $user_id = get_current_user_id();
+        set_transient('sos_pg_partner_configs_notice_' . $user_id, [
+            'type' => $type === 'success' ? 'success' : 'error',
+            'messages' => array_values($messages),
+            'partner_id' => (string) $partner_id,
+        ], 60);
+    }
+
+    private function build_partner_config_from_entry(array $entry, array $existing_cfg = [], $forced_partner_id = '') {
+        $partner_id = $forced_partner_id !== ''
+            ? $forced_partner_id
+            : sanitize_text_field((string) ($entry['partner_id'] ?? ''));
+        $errors = [];
+
+        if ($partner_id === '') {
+            return [
+                'partner_id' => '',
+                'config' => [],
+                'errors' => ['Partner ID mancante.'],
+            ];
+        }
+
+        $type = sanitize_text_field((string) ($entry['type'] ?? 'wordpress'));
+        if (!in_array($type, ['wordpress', 'external_api', 'embedded_booking'], true)) {
+            $type = 'wordpress';
+        }
+
+        $existing_pem = trim((string) ($existing_cfg['private_key_pem'] ?? ''));
+        $existing_path = trim((string) ($existing_cfg['private_key_path'] ?? ''));
+        $retain_private_key_path = !empty($entry['retain_private_key_path']);
+        $private_key_path = '';
+        $private_key_path_input = sanitize_text_field((string) ($entry['private_key_path'] ?? ''));
+
+        if ($private_key_path_input !== '') {
+            $real = realpath($private_key_path_input);
+            $path_error_reason = '';
+            if ($real === false) {
+                $path_error_reason = 'file non trovato';
+            } elseif (!is_file($real)) {
+                $path_error_reason = 'il percorso non punta a un file';
+            } elseif (!is_readable($real)) {
+                $path_error_reason = 'file non leggibile';
+            }
+
+            if ($path_error_reason !== '') {
+                $errors[] = 'Partner "' . $partner_id . '": campo private_key_path non valido (' . $path_error_reason . ').';
+            } else {
+                $private_key_path = $real;
+            }
+        } elseif ($retain_private_key_path && $existing_path !== '') {
+            $private_key_path = $existing_path;
+        } elseif ($type === 'embedded_booking' && $existing_pem === '') {
+            $errors[] = 'Partner "' . $partner_id . '": campo private_key_path obbligatorio per embedded_booking.';
+        }
+
+        if (!empty($errors)) {
+            return [
+                'partner_id' => $partner_id,
+                'config' => [],
+                'errors' => $errors,
+            ];
+        }
+
+        $completion_return_url = $this->validate_completion_return_url((string) ($entry['completion_return_url'] ?? ''));
+        if ((string) ($entry['completion_return_url'] ?? '') !== '' && $completion_return_url === '') {
+            return [
+                'partner_id' => $partner_id,
+                'config' => [],
+                'errors' => ['Partner "' . $partner_id . '": campo completion_return_url non valido. Inserisci una URL assoluta http/https.'],
+            ];
+        }
+
+        $cfg = [
+            'partner_id'                => $partner_id,
+            'enabled'                   => !empty($entry['enabled']),
+            'type'                      => $type,
+            'integration_mode'          => sanitize_text_field((string) ($entry['integration_mode'] ?? '')),
+            'completion_return_url'     => $completion_return_url,
+            'api_base_url'              => esc_url_raw((string) ($entry['api_base_url'] ?? '')),
+            'api_key'                   => (string) ($entry['api_key'] ?? ''),
+            'public_key_pem'            => (string) ($entry['public_key_pem'] ?? ''),
+            'private_key_path'          => $private_key_path,
+            'webhook_url'               => esc_url_raw((string) ($entry['webhook_url'] ?? '')),
+            'webhook_secret'            => (string) ($entry['webhook_secret'] ?? ''),
+            'callback_secret'           => (string) ($entry['callback_secret'] ?? ''),
+            'validation_token_strategy' => sanitize_text_field((string) ($entry['validation_token_strategy'] ?? '')),
+            'external_ref_mapping'      => sanitize_text_field((string) ($entry['external_ref_mapping'] ?? '')),
+            'no_upfront_cost'           => !empty($entry['no_upfront_cost']),
+            'notes'                     => sanitize_textarea_field((string) ($entry['notes'] ?? '')),
+        ];
+
+        if ($existing_pem !== '') {
+            $cfg['private_key_pem'] = $existing_pem;
+        }
+
+        $flags_raw = isset($entry['flags']) ? (string) $entry['flags'] : '';
+        $metadata_raw = isset($entry['metadata']) ? (string) $entry['metadata'] : '';
+        $cfg['flags'] = $this->parse_json_array_or_csv_list($flags_raw);
+        $cfg['metadata'] = $this->parse_json_struct_or_empty($metadata_raw);
+
+        return [
+            'partner_id' => $partner_id,
+            'config' => $cfg,
+            'errors' => [],
+        ];
     }
 
     private function parse_json_array_or_csv_list($raw) {
@@ -1760,7 +3734,10 @@ class SOS_PG_Plugin {
         $settings['site_role'] = in_array($new_role, ['main', 'partner'], true) ? $new_role : 'main';
 
         // Campi comuni a entrambe le modalità.
-        $settings['self_login_private_key_pem'] = trim((string) wp_unslash($_POST['self_login_private_key_pem'] ?? ''));
+        $incoming_self_login_pem = trim((string) wp_unslash($_POST['self_login_private_key_pem'] ?? ''));
+        if ($incoming_self_login_pem !== '') {
+            $settings['self_login_private_key_pem'] = $incoming_self_login_pem;
+        }
         $settings['self_login_partner_id'] = sanitize_text_field(wp_unslash($_POST['self_login_partner_id'] ?? ''));
         $settings['self_login_endpoint_url'] = esc_url_raw(trim((string) wp_unslash($_POST['self_login_endpoint_url'] ?? '')));
 
@@ -1878,8 +3855,6 @@ class SOS_PG_Plugin {
                 // Nuova riga: se il partner_id è stato compilato e il checkbox usava __new__, abilita pay_on_partner.
                 if (!$pop && $pid !== '' && isset($pop_set['__new__'])) {
                     $pop = true;
-                    // TEMP DEBUG
-                    error_log('SOS_PG DISCOUNTS SAVE NEW ROW partner=' . $pid . ' pay_on_partner=1');
                 }
 
                 if ($pid === '') {
@@ -2034,10 +4009,21 @@ class SOS_PG_Plugin {
     }
 
     public function apply_partner_discount($amount, $booking = null, $apply_coupons = null) {
-        $__sos_pg_t0 = microtime(true);
+
+        // LatePoint deve restare neutro fuori dal contesto partner.
+        // In admin e nelle richieste non originate da una pagina partner, il filtro non fa nulla.
+        if (!$this->is_partner_context('pricing')) {
+            return $amount;
+        }
+
+        $active_partner_id = $this->get_current_partner_id();
+        if ($active_partner_id === '') {
+            return $amount;
+        }
+
         $result = null;
 
-        $config = $this->get_partner_discount_config();
+        $config = $this->get_partner_discount_config($active_partner_id);
 
         if ($config['pay_on_partner']) {
             // Forza il totale a 0 sul sito principale: il pagamento avviene sul portale del partner.
@@ -2056,10 +4042,6 @@ class SOS_PG_Plugin {
             $result = max(0.0, (float) $amount - $config['amount']);
         }
 
-        $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
-        if ($__sos_pg_dt > 0.05) {
-            error_log(sprintf('SOS_PG PERF apply_partner_discount: %.4f sec', $__sos_pg_dt));
-        }
 
         return $result;
     }
@@ -2099,20 +4081,16 @@ class SOS_PG_Plugin {
     }
 
     public function handle_book_now_request() {
-        $__sos_pg_t0 = microtime(true);
         if (!isset($_GET['sos_pg_book_now'])) {
-            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
-            if ($__sos_pg_dt > 0.05) {
-                error_log(sprintf('SOS_PG PERF handle_book_now_request: %.4f sec', $__sos_pg_dt));
-            }
             return;
         }
 
+        if (!$this->is_partner_context('book_now')) {
+            status_header(403);
+            exit('Contesto partner non valido');
+        }
+
         if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
-            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
-            if ($__sos_pg_dt > 0.05) {
-                error_log(sprintf('SOS_PG PERF handle_book_now_request: %.4f sec', $__sos_pg_dt));
-            }
             status_header(405);
             exit('Metodo non consentito');
         }
@@ -2131,9 +4109,9 @@ class SOS_PG_Plugin {
         }
 
         if ($partner_id !== '') {
-            $partner_cfg = $this->partner_registry ? $this->partner_registry->get_partner_config($partner_id) : null;
-            if ($partner_cfg && !empty($partner_cfg['private_key_pem'])) {
-                $pem = trim((string) $partner_cfg['private_key_pem']);
+            $partner_pem = $this->partner_registry ? $this->partner_registry->get_partner_private_key($partner_id) : '';
+            if ($partner_pem !== '') {
+                $pem = $partner_pem;
             }
         }
 
@@ -2143,38 +4121,22 @@ class SOS_PG_Plugin {
         }
 
         if ($email === '' || !is_email($email)) {
-            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
-            if ($__sos_pg_dt > 0.05) {
-                error_log(sprintf('SOS_PG PERF handle_book_now_request: %.4f sec', $__sos_pg_dt));
-            }
             wp_safe_redirect(add_query_arg('sos_pg_err', 'email', wp_get_referer() ?: home_url('/')));
             exit;
         }
 
         if ($partner_id === '') {
-            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
-            if ($__sos_pg_dt > 0.05) {
-                error_log(sprintf('SOS_PG PERF handle_book_now_request: %.4f sec', $__sos_pg_dt));
-            }
             wp_safe_redirect(add_query_arg('sos_pg_err', 'partner', wp_get_referer() ?: home_url('/')));
             exit;
         }
 
         if ($pem === '') {
-            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
-            if ($__sos_pg_dt > 0.05) {
-                error_log(sprintf('SOS_PG PERF handle_book_now_request: %.4f sec', $__sos_pg_dt));
-            }
             wp_safe_redirect(add_query_arg('sos_pg_err', 'key', wp_get_referer() ?: home_url('/')));
             exit;
         }
 
         $private_key = openssl_pkey_get_private($pem);
         if (!$private_key) {
-            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
-            if ($__sos_pg_dt > 0.05) {
-                error_log(sprintf('SOS_PG PERF handle_book_now_request: %.4f sec', $__sos_pg_dt));
-            }
             wp_safe_redirect(add_query_arg('sos_pg_err', 'key', wp_get_referer() ?: home_url('/')));
             exit;
         }
@@ -2188,10 +4150,6 @@ class SOS_PG_Plugin {
         openssl_free_key($private_key);
 
         if (!$ok) {
-            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
-            if ($__sos_pg_dt > 0.05) {
-                error_log(sprintf('SOS_PG PERF handle_book_now_request: %.4f sec', $__sos_pg_dt));
-            }
             wp_safe_redirect(add_query_arg('sos_pg_err', 'sign', wp_get_referer() ?: home_url('/')));
             exit;
         }
@@ -2217,10 +4175,6 @@ class SOS_PG_Plugin {
         echo '<script>document.getElementById("sosPgBookNowForm").submit();</script>';
         echo '</body></html>';
 
-        $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
-        if ($__sos_pg_dt > 0.05) {
-            error_log(sprintf('SOS_PG PERF handle_book_now_request: %.4f sec', $__sos_pg_dt));
-        }
         exit;
     }
 
@@ -2308,7 +4262,6 @@ class SOS_PG_Plugin {
     }
 
     public function handle_booking_created($booking, $cart = null) {
-        $__sos_pg_t0 = microtime(true);
         static $sent_booking_ids = [];
 
         $booking_id_early = (string) $this->safe_get($booking, 'id');
@@ -2316,15 +4269,18 @@ class SOS_PG_Plugin {
             // Deduplicazione: evita l'invio doppio del webhook quando entrambi gli hook
             // LatePoint (latepoint_after_create_booking e latepoint_booking_created) scattano
             // per lo stesso booking nella stessa request.
-            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
-            if ($__sos_pg_dt > 0.05) {
-                error_log(sprintf('SOS_PG PERF handle_booking_created: %.4f sec', $__sos_pg_dt));
-            }
             return;
         }
 
         // Recupera location_id subito: serve sia per il payload sia come fallback partner.
         $location_id = $this->safe_get($booking, 'location_id');
+
+        if (!$this->is_partner_context('booking_created', [
+            'allow_location_lookup' => true,
+            'location_id' => $location_id,
+        ])) {
+            return;
+        }
 
         $partner_id = $this->get_current_partner_id();
 
@@ -2349,10 +4305,6 @@ class SOS_PG_Plugin {
                 'context' => ['booking_id' => $booking_id_early, 'location_id' => $location_id],
                 'reason' => $hint ?: null,
             ]);
-            $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
-            if ($__sos_pg_dt > 0.05) {
-                error_log(sprintf('SOS_PG PERF handle_booking_created: %.4f sec', $__sos_pg_dt));
-            }
             return;
         }
 
@@ -2369,16 +4321,24 @@ class SOS_PG_Plugin {
         $discount_config  = $this->get_partner_discount_config($partner_id);
         $partner_charge   = null;
         if ($discount_config['pay_on_partner'] && $this->partner_original_total !== null) {
-            // Non azzera partner_original_total: handle_booking_created può essere richiamata
-            // da entrambi gli hook (latepoint_after_create_booking e latepoint_booking_created)
-            // per lo stesso booking nella stessa request, quindi il valore deve restare disponibile.
             $partner_charge = $this->partner_original_total;
+            // Reset dopo l'uso: il dedup $sent_booking_ids garantisce che il secondo hook per
+            // lo stesso booking non raggiunga mai questo punto, quindi il valore è utilizzato
+            // una sola volta. Il reset evita il data bleed verso booking successivi.
+            $this->partner_original_total = null;
         }
         $customer_email = $this->safe_get_nested($booking, ['customer', 'email']);
+        if ($customer_email === '') {
+            $customer_email = $this->safe_get($booking, 'customer_email');
+        }
         $customer_phone = $this->safe_get_nested($booking, ['customer', 'phone']);
         $customer_name = $this->safe_get_nested($booking, ['customer', 'full_name']);
         $customer_first_name = $this->safe_get_nested($booking, ['customer', 'first_name']);
         $customer_last_name = $this->safe_get_nested($booking, ['customer', 'last_name']);
+        $service_name = $this->get_booking_service_name($service_id, $booking);
+        $booking_datetime = $this->build_booking_datetime_value($start_date, $start_time);
+        $external_reference = $this->resolve_booking_external_reference($partner_id, $booking_id, $booking, $customer_email);
+        $amount = $partner_charge !== null ? (float) $partner_charge : $total;
 
         $this->log_event('INFO', 'BOOKING_PARTNER_HOOK', [
             'partner_id' => $partner_id,
@@ -2388,33 +4348,15 @@ class SOS_PG_Plugin {
             ],
         ]);
 
-        $payload = [
-            'event' => 'booking_created',
-            'partner_id' => $partner_id,
-            'booking_id' => $booking_id,
-            'status' => $status,
-            'service_id' => $service_id,
-            'agent_id' => $agent_id,
-            'location_id' => $location_id,
-            'start_date' => $start_date,
-            'start_time' => $start_time,
-            'end_time' => $end_time,
-            'total' => $total,
-            'customer_email' => $customer_email,
-            'customer_phone' => $customer_phone,
-            'customer_name' => $customer_name,
-            'customer_first_name' => $customer_first_name,
-            'customer_last_name' => $customer_last_name,
-        ];
-
-        // Salva partner_id e location_id in meta LatePoint per tracciamento/report.
-        if ($booking_id) {
-            if ($partner_id) {
-                $this->set_booking_meta($booking_id, 'partner_id', $partner_id);
-            }
-            if ($location_id) {
-                $this->set_booking_meta($booking_id, 'partner_location_id', $location_id);
-            }
+        // Scrivi dati partner nella tabella custom SOS (sorgente unica dalla Fase 3).
+        if ($booking_id && $partner_id) {
+            $this->upsert_partner_booking_record([
+                'lp_booking_id'  => $booking_id,
+                'partner_id'     => $partner_id,
+                'location_id'    => $location_id,
+                'payment_external_ref' => $external_reference,
+                'partner_charge' => $partner_charge,
+            ]);
         }
 
         // Webhook per-partner con payload minimo utile al pagamento.
@@ -2422,17 +4364,24 @@ class SOS_PG_Plugin {
             'event' => 'booking_created',
             'partner_id' => $partner_id,
             'booking_id' => $booking_id,
+            'email' => $customer_email,
+            'service' => $service_name !== '' ? $service_name : (string) $service_id,
+            'datetime' => $booking_datetime,
+            'amount' => $amount,
             'status' => $status,
             'total' => $total,
             'service_id' => $service_id,
+            'service_name' => $service_name,
             'location_id' => $location_id,
             'start_date' => $start_date,
             'start_time' => $start_time,
+            'end_time' => $end_time,
             'customer_email' => $customer_email,
             'customer_phone' => $customer_phone,
             'customer_name' => $customer_name,
             'customer_first_name' => $customer_first_name,
             'customer_last_name' => $customer_last_name,
+            'external_reference' => $external_reference,
         ];
 
         // Se il pagamento è sul portale del partner, includi l'importo da incassare.
@@ -2447,10 +4396,6 @@ class SOS_PG_Plugin {
         }
         $this->send_partner_webhook($partner_id, $partner_payload);
 
-        $__sos_pg_dt = microtime(true) - $__sos_pg_t0;
-        if ($__sos_pg_dt > 0.05) {
-            error_log(sprintf('SOS_PG PERF handle_booking_created: %.4f sec', $__sos_pg_dt));
-        }
     }
 
     private function send_partner_webhook($partner_id, array $payload) {
@@ -2458,23 +4403,44 @@ class SOS_PG_Plugin {
             return;
         }
 
-        $webhooks = $this->get_partner_webhooks();
-        if (empty($webhooks[$partner_id]['url'])) {
+        $webhook = $this->get_partner_webhook_config($partner_id);
+        if (empty($webhook['url'])) {
             $this->log_event('INFO', 'WEBHOOK_PARTNER_SKIP_NO_URL', [
                 'partner_id' => $partner_id,
                 'context' => ['booking_id' => $payload['booking_id'] ?? null],
             ]);
+            $this->log_event('ERROR', 'WEBHOOK_BOOKING_ERROR', [
+                'partner_id' => $partner_id,
+                'reason' => 'missing_webhook_url',
+                'context' => [
+                    'booking_id' => $payload['booking_id'] ?? null,
+                ],
+            ]);
             return;
         }
 
-        $url = $webhooks[$partner_id]['url'];
-        $secret = $webhooks[$partner_id]['secret'] ?? '';
+        $url = $webhook['url'];
+        $secret = $webhook['secret'] ?? '';
 
         $body = wp_json_encode($payload);
-        $headers = ['Content-Type' => 'application/json'];
+        $headers = [
+            'Content-Type' => 'application/json',
+            'X-SOSPG-Event' => 'booking_created',
+            'X-SOSPG-Partner-ID' => (string) $partner_id,
+        ];
         if ($secret !== '') {
             $headers['X-SOSPG-Signature'] = hash_hmac('sha256', (string) $body, (string) $secret);
         }
+
+        $this->log_event('INFO', 'WEBHOOK_BOOKING_SENT', [
+            'partner_id' => $partner_id,
+            'context' => [
+                'booking_id' => $payload['booking_id'] ?? null,
+                'url' => $url,
+                'config_source' => (string) ($webhook['source'] ?? ''),
+                'payload' => $payload,
+            ],
+        ]);
 
         $resp = wp_remote_post($url, [
             'headers' => $headers,
@@ -2488,10 +4454,30 @@ class SOS_PG_Plugin {
                 'reason' => $resp->get_error_message(),
                 'context' => $payload,
             ]);
+            $this->log_event('ERROR', 'WEBHOOK_BOOKING_ERROR', [
+                'partner_id' => $partner_id,
+                'reason' => $resp->get_error_message(),
+                'context' => [
+                    'booking_id' => $payload['booking_id'] ?? null,
+                    'url' => $url,
+                ],
+            ]);
             return;
         }
 
         $http_code = wp_remote_retrieve_response_code($resp);
+        $response_body = substr((string) wp_remote_retrieve_body($resp), 0, 1000);
+
+        $this->log_event('INFO', 'WEBHOOK_BOOKING_RESPONSE', [
+            'partner_id' => $partner_id,
+            'context' => [
+                'booking_id' => $payload['booking_id'] ?? null,
+                'url' => $url,
+                'http_code' => $http_code,
+                'response_body' => $response_body,
+            ],
+        ]);
+
         if ($http_code < 200 || $http_code >= 300) {
             $this->log_event('WARN', 'WEBHOOK_PARTNER_FAIL', [
                 'partner_id' => $partner_id,
@@ -2499,6 +4485,15 @@ class SOS_PG_Plugin {
                 'context' => [
                     'booking_id'    => $payload['booking_id'] ?? null,
                     'response_body' => substr((string) wp_remote_retrieve_body($resp), 0, 500),
+                ],
+            ]);
+            $this->log_event('ERROR', 'WEBHOOK_BOOKING_ERROR', [
+                'partner_id' => $partner_id,
+                'reason' => 'HTTP ' . $http_code,
+                'context' => [
+                    'booking_id' => $payload['booking_id'] ?? null,
+                    'url' => $url,
+                    'response_body' => $response_body,
                 ],
             ]);
             return;
@@ -2510,11 +4505,17 @@ class SOS_PG_Plugin {
     }
 
     public function handle_payment_callback() {
+
         $request_path = $this->current_request_path();
         $cb_path = $this->current_payment_callback_path();
 
         if ($request_path !== $cb_path && $request_path !== $cb_path . '/') {
             return;
+        }
+
+        if (!$this->is_partner_context('payment_callback')) {
+            status_header(403);
+            exit('Contesto partner non valido');
         }
 
         $settings = $this->get_settings();
@@ -2534,7 +4535,6 @@ class SOS_PG_Plugin {
         }
 
         $booking_id = absint($data['booking_id'] ?? 0);
-        $incoming_status = sanitize_text_field($data['status'] ?? '');
         $transaction_id = sanitize_text_field($data['transaction_id'] ?? '');
         $partner_id = sanitize_text_field($data['partner_id'] ?? '');
         $amount_paid = isset($data['amount_paid']) ? (float) $data['amount_paid'] : null;
@@ -2582,16 +4582,54 @@ class SOS_PG_Plugin {
             exit('Dati mancanti');
         }
 
+        if ($partner_id === '') {
+            $this->log_event('WARN', 'PAYMENT_CALLBACK_MISSING_PARTNER', [
+                'reason' => 'missing_partner_id',
+                'context' => [
+                    'booking_id' => $booking_id,
+                    'transaction_id' => $transaction_id,
+                ],
+            ]);
+            status_header(400);
+            exit('Dati mancanti');
+        }
+
         if ($transaction_id === '') {
             $this->log_event('WARN', 'PAYMENT_CALLBACK_MISSING_TX', [
                 'partner_id' => $partner_id,
                 'context' => ['booking_id' => $booking_id],
             ]);
-            $transaction_id = 'TEST-' . time();
+            status_header(400);
+            exit('Dati mancanti');
         }
 
-        if ($partner_id !== '') {
-            global $wpdb;
+        global $wpdb;
+        // ── 1. Verify the booking row exists; capture current payment_status for later checks ──
+        $booking_row = $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT id, payment_status FROM {$this->booking_table} WHERE id = %d LIMIT 1",
+                $booking_id
+            )
+        );
+        if (!$booking_row) {
+            $this->log_event('WARN', 'PAYMENT_CALLBACK_BOOKING_NOT_FOUND', [
+                'partner_id' => $partner_id,
+                'reason' => 'booking_not_found',
+                'context' => [
+                    'booking_id' => $booking_id,
+                    'transaction_id' => $transaction_id,
+                ],
+            ]);
+            status_header(404);
+            exit('Prenotazione non trovata');
+        }
+
+        // ── 2. Verify partner_id against the record stored during booking_created ──
+        $sos_record = $this->get_partner_booking_record($booking_id);
+        if ($sos_record !== null) {
+            $booking_partner_id = (string) $sos_record->partner_id;
+        } else {
+            // Fallback compat: prenotazioni create prima della Fase 1 (tabella custom assente).
             $booking_partner_id = (string) $wpdb->get_var(
                 $wpdb->prepare(
                     "SELECT meta_value FROM {$this->booking_meta_table} WHERE object_id = %d AND meta_key = %s LIMIT 1",
@@ -2599,10 +4637,122 @@ class SOS_PG_Plugin {
                     'partner_id'
                 )
             );
-            if ($booking_partner_id !== '' && $booking_partner_id !== $partner_id) {
+        }
+        if ($booking_partner_id === '' || $booking_partner_id !== $partner_id) {
+            $this->log_event('WARN', 'PAYMENT_CALLBACK_PARTNER_MISMATCH', [
+                'partner_id' => $partner_id,
+                'reason' => 'partner_mismatch',
+                'context' => [
+                    'booking_id' => $booking_id,
+                    'booking_partner_id' => $booking_partner_id,
+                    'transaction_id' => $transaction_id,
+                ],
+            ]);
+            status_header(403);
+            exit('Partner mismatch per booking');
+        }
+
+        // ── 3. Cross-check partner_location_id against the webhook registry ──
+        // If the booking carries a location_id and that location maps to a *different*
+        // partner in the webhook config, the incoming partner_id is inconsistent.
+        if ($sos_record !== null) {
+            $booking_location_id = (string) $sos_record->location_id;
+        } else {
+            $booking_location_id = (string) $wpdb->get_var(
+                $wpdb->prepare(
+                    "SELECT meta_value FROM {$this->booking_meta_table} WHERE object_id = %d AND meta_key = %s LIMIT 1",
+                    $booking_id,
+                    'partner_location_id'
+                )
+            );
+        }
+        if ($booking_location_id !== '') {
+            $location_partner_id = $this->get_partner_id_by_location($booking_location_id);
+            if ($location_partner_id !== '' && $location_partner_id !== $partner_id) {
+                $this->log_event('WARN', 'PAYMENT_CALLBACK_LOCATION_MISMATCH', [
+                    'partner_id' => $partner_id,
+                    'reason' => 'location_partner_mismatch',
+                    'context' => [
+                        'booking_id' => $booking_id,
+                        'booking_location_id' => $booking_location_id,
+                        'location_maps_to_partner' => $location_partner_id,
+                        'transaction_id' => $transaction_id,
+                    ],
+                ]);
                 status_header(403);
-                exit('Partner mismatch per booking');
+                exit('Location mismatch per booking');
             }
+        }
+
+        // ── 4. Dedup: same transaction_id already processed → idempotent 409 ──
+        if ($sos_record !== null) {
+            $existing_transaction_id = (string) $sos_record->payment_transaction_id;
+        } else {
+            $existing_transaction_id = (string) $wpdb->get_var(
+                $wpdb->prepare(
+                    "SELECT meta_value FROM {$this->booking_meta_table} WHERE object_id = %d AND meta_key = %s LIMIT 1",
+                    $booking_id,
+                    'payment_transaction_id'
+                )
+            );
+        }
+        if ($existing_transaction_id !== '' && hash_equals($existing_transaction_id, $transaction_id)) {
+            $this->log_event('WARN', 'PAYMENT_CALLBACK_DUPLICATE_TX', [
+                'partner_id' => $partner_id,
+                'reason' => 'duplicate_transaction_id',
+                'context' => [
+                    'booking_id' => $booking_id,
+                    'transaction_id' => $transaction_id,
+                ],
+            ]);
+            status_header(409);
+            exit('Transaction già processata');
+        }
+
+        // ── 5. Booking already paid with a *different* transaction → reject ──
+        // The dedup above handles exact-same-tx replays. This catches a second attempt
+        // on a booking that is already closed with a different transaction_id.
+        if ((string) $booking_row->payment_status === 'paid' && $existing_transaction_id !== '') {
+            $this->log_event('WARN', 'PAYMENT_CALLBACK_ALREADY_PAID', [
+                'partner_id' => $partner_id,
+                'reason' => 'booking_already_paid',
+                'context' => [
+                    'booking_id' => $booking_id,
+                    'existing_transaction_id' => $existing_transaction_id,
+                    'incoming_transaction_id' => $transaction_id,
+                ],
+            ]);
+            status_header(409);
+            exit('Prenotazione già pagata con transazione diversa');
+        }
+
+        // ── 6. external_reference conflict: same booking, stored ref differs ──
+        // Protects against a partner sending a new callback with a different payment
+        // reference for a booking that already has one registered.
+        if ($sos_record !== null) {
+            $stored_ext_ref = (string) $sos_record->payment_external_ref;
+        } else {
+            $stored_ext_ref = (string) $wpdb->get_var(
+                $wpdb->prepare(
+                    "SELECT meta_value FROM {$this->booking_meta_table} WHERE object_id = %d AND meta_key = %s LIMIT 1",
+                    $booking_id,
+                    'payment_external_reference'
+                )
+            );
+        }
+        if ($stored_ext_ref !== '' && $external_reference !== '' && !hash_equals($stored_ext_ref, $external_reference)) {
+            $this->log_event('WARN', 'PAYMENT_CALLBACK_EXT_REF_MISMATCH', [
+                'partner_id' => $partner_id,
+                'reason' => 'external_reference_mismatch',
+                'context' => [
+                    'booking_id' => $booking_id,
+                    'stored_external_reference' => $stored_ext_ref,
+                    'incoming_external_reference' => $external_reference,
+                    'transaction_id' => $transaction_id,
+                ],
+            ]);
+            status_header(409);
+            exit('Conflitto su external_reference');
         }
 
         // Stato finale sempre gestito da LatePoint: fissiamo pending (o valore da impostazioni) e pagamento "paid".
@@ -2614,7 +4764,6 @@ class SOS_PG_Plugin {
             exit('Stato mancante');
         }
 
-        global $wpdb;
         $wpdb->update(
             $this->booking_table,
             [
@@ -2625,6 +4774,15 @@ class SOS_PG_Plugin {
             ['%s', '%s'],
             ['%d']
         );
+        // Aggiorna dati pagamento nella tabella custom SOS (sorgente unica dalla Fase 3).
+        $this->upsert_partner_booking_record([
+            'lp_booking_id'          => $booking_id,
+            'partner_id'             => $partner_id,
+            'payment_transaction_id' => $transaction_id,
+            'payment_external_ref'   => $external_reference,
+            'payment_status'         => $target_payment_status,
+            'confirmed_at'           => current_time('mysql'),
+        ]);
 
         $this->log_event('INFO', 'PAYMENT_CALLBACK_OK', [
             'partner_id' => $partner_id,
@@ -2655,6 +4813,7 @@ class SOS_PG_Plugin {
             $summary_payload['email'] = $email;
         }
         $this->log_event('INFO', 'PARTNER_FLOW_SUMMARY', $summary_payload);
+
 
         wp_send_json_success(['ok' => true]);
     }
@@ -2696,6 +4855,11 @@ class SOS_PG_Plugin {
     public function handle_partner_tester_webhook() {
         if (!isset($_GET['sos_pg_webhook']) && !isset($_GET['sos_pg_tester_webhook'])) {
             return;
+        }
+
+        if (!$this->is_partner_context('partner_webhook')) {
+            status_header(403);
+            exit;
         }
 
         // Accetta solo richieste POST: una GET (es. browser) non deve sovrascrivere l'ultimo webhook registrato.
@@ -2891,9 +5055,9 @@ class SOS_PG_Plugin {
         $pem        = (string) ($settings['self_login_private_key_pem'] ?? '');
 
         if ($partner_id !== '') {
-            $partner_cfg = $this->partner_registry ? $this->partner_registry->get_partner_config($partner_id) : null;
-            if ($partner_cfg && !empty($partner_cfg['private_key_pem'])) {
-                $pem = (string) $partner_cfg['private_key_pem'];
+            $partner_pem = $this->partner_registry ? $this->partner_registry->get_partner_private_key($partner_id) : '';
+            if ($partner_pem !== '') {
+                $pem = $partner_pem;
             }
         }
 
