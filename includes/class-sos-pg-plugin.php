@@ -2062,7 +2062,7 @@ class SOS_PG_Plugin {
         }
 
         $script_url = plugin_dir_url(SOS_PG_FILE) . $script_relative_path;
-        $script_version = '2026-04-09-2';
+        $script_version = '2026-04-14-2';
         wp_enqueue_script('sos-pg-partner-completion-monitor', $script_url, [], $script_version, true);
         $current_user_id = get_current_user_id();
         $flow_context = $current_user_id > 0
@@ -4668,7 +4668,7 @@ class SOS_PG_Plugin {
         }
         if ($booking_location_id !== '') {
             $location_partner_id = $this->get_partner_id_by_location($booking_location_id);
-            if ($location_partner_id !== '' && $location_partner_id !== $partner_id) {
+            if ($location_partner_id !== '' && $location_partner_id !== $partner_id && !$this->location_allows_multiple_partners($booking_location_id)) {
                 $this->log_event('WARN', 'PAYMENT_CALLBACK_LOCATION_MISMATCH', [
                     'partner_id' => $partner_id,
                     'reason' => 'location_partner_mismatch',
@@ -4757,6 +4757,46 @@ class SOS_PG_Plugin {
 
         // Stato finale sempre gestito da LatePoint: fissiamo pending (o valore da impostazioni) e pagamento "paid".
         $target_status = $settings['payment_success_status'] ?: 'pending';
+
+        $raw_payment_success_status = isset($settings['payment_success_status']) ? sanitize_text_field((string) $settings['payment_success_status']) : '';
+        $resolved_target_status = sanitize_text_field((string) $target_status);
+        $latepoint_statuses = [];
+        $latepoint_status_slugs = [];
+        $is_valid_latepoint_target_status = false;
+
+        if (class_exists('OsBookingHelper') && method_exists('OsBookingHelper', 'get_statuses_list')) {
+            $latepoint_statuses = (array) OsBookingHelper::get_statuses_list();
+            $latepoint_status_slugs = array_keys($latepoint_statuses);
+            $is_valid_latepoint_target_status = in_array($resolved_target_status, $latepoint_status_slugs, true);
+        }
+
+        $this->log_event('INFO', 'PAYMENT_CALLBACK_TARGET_STATUS_DEBUG', [
+            'partner_id' => $partner_id,
+            'context' => [
+                'booking_id' => $booking_id,
+                'transaction_id' => $transaction_id,
+                'raw_payment_success_status' => $raw_payment_success_status,
+                'resolved_target_status' => $resolved_target_status,
+                'latepoint_statuses' => $latepoint_statuses,
+                'latepoint_status_slugs' => $latepoint_status_slugs,
+                'is_valid_latepoint_target_status' => $is_valid_latepoint_target_status,
+            ],
+        ]);
+
+        if (!$is_valid_latepoint_target_status) {
+            $this->log_event('WARN', 'PAYMENT_CALLBACK_UNKNOWN_TARGET_STATUS', [
+                'partner_id' => $partner_id,
+                'reason' => 'unknown_target_status_slug',
+                'context' => [
+                    'booking_id' => $booking_id,
+                    'transaction_id' => $transaction_id,
+                    'raw_payment_success_status' => $raw_payment_success_status,
+                    'resolved_target_status' => $resolved_target_status,
+                    'latepoint_status_slugs' => $latepoint_status_slugs,
+                ],
+            ]);
+        }
+
         $target_payment_status = 'paid';
 
         if ($target_status === '') {
@@ -4764,16 +4804,88 @@ class SOS_PG_Plugin {
             exit('Stato mancante');
         }
 
-        $wpdb->update(
+        $this->log_event('INFO', 'PAYMENT_CALLBACK_BOOKING_LOAD_START', [
+            'partner_id' => $partner_id,
+            'context' => [
+                'booking_id' => $booking_id,
+                'target_status' => $target_status,
+                'transaction_id' => $transaction_id,
+            ],
+        ]);
+
+        if (!class_exists('OsBookingModel')) {
+            status_header(500);
+            exit('LatePoint non disponibile');
+        }
+
+        $booking_model = new OsBookingModel($booking_id);
+        if (empty($booking_model->id)) {
+            status_header(404);
+            exit('Prenotazione non trovata');
+        }
+
+        if ((string) $booking_model->status !== (string) $target_status) {
+            $this->log_event('INFO', 'PAYMENT_CALLBACK_UPDATE_STATUS_START', [
+                'partner_id' => $partner_id,
+                'context' => [
+                    'booking_id' => $booking_id,
+                    'from_status' => (string) $booking_model->status,
+                    'to_status' => (string) $target_status,
+                    'transaction_id' => $transaction_id,
+                ],
+            ]);
+
+            if (!$booking_model->update_status($target_status)) {
+                $this->log_event('WARN', 'PAYMENT_CALLBACK_UPDATE_STATUS_FAIL', [
+                    'partner_id' => $partner_id,
+                    'reason' => 'latepoint_update_status_failed',
+                    'context' => [
+                        'booking_id' => $booking_id,
+                        'from_status' => (string) $booking_model->status,
+                        'to_status' => (string) $target_status,
+                        'transaction_id' => $transaction_id,
+                    ],
+                ]);
+                status_header(500);
+                exit('Impossibile aggiornare lo stato prenotazione');
+            }
+
+            $this->log_event('INFO', 'PAYMENT_CALLBACK_UPDATE_STATUS_OK', [
+                'partner_id' => $partner_id,
+                'context' => [
+                    'booking_id' => $booking_id,
+                    'status' => (string) $target_status,
+                    'transaction_id' => $transaction_id,
+                ],
+            ]);
+        } else {
+            $this->log_event('INFO', 'PAYMENT_CALLBACK_STATUS_ALREADY_SET', [
+                'partner_id' => $partner_id,
+                'context' => [
+                    'booking_id' => $booking_id,
+                    'status' => (string) $target_status,
+                ],
+            ]);
+        }
+
+        $result = $wpdb->update(
             $this->booking_table,
             [
-                'status' => $target_status,
                 'payment_status' => $target_payment_status,
             ],
             ['id' => $booking_id],
-            ['%s', '%s'],
+            ['%s'],
             ['%d']
         );
+
+        if ($result === false) {
+            $this->log_event('WARN', 'PAYMENT_CALLBACK_PAYMENT_STATUS_FAIL', [
+                'partner_id' => $partner_id,
+                'context' => [
+                    'booking_id' => $booking_id,
+                ],
+            ]);
+        }
         // Aggiorna dati pagamento nella tabella custom SOS (sorgente unica dalla Fase 3).
         $this->upsert_partner_booking_record([
             'lp_booking_id'          => $booking_id,
@@ -4816,6 +4928,17 @@ class SOS_PG_Plugin {
 
 
         wp_send_json_success(['ok' => true]);
+    }
+
+    private function location_allows_multiple_partners($location_id) {
+    $webhooks = $this->get_partner_webhooks();
+    $count = 0;
+    foreach ($webhooks as $cfg) {
+        if (is_array($cfg) && (string)($cfg['location_id'] ?? '') === (string)$location_id) {
+            $count++;
+        }
+    }
+    return $count > 1;
     }
 
     private function safe_get($source, $key, $default = '') {

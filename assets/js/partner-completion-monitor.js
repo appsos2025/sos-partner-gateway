@@ -408,7 +408,11 @@
 
     window.XMLHttpRequest.prototype.send = function () {
       this.addEventListener('load', function () {
-        if (!isLikelyLatePointRequest(this.__sosPgRequestUrl || '')) {
+        var requestUrl = this.__sosPgRequestUrl || '';
+        if (!isLikelyLatePointRequest(requestUrl)) {
+          return;
+        }
+        if (requestUrl.indexOf('steps__reload_booking_form_summary_panel') !== -1) {
           return;
         }
         inspectPayloadForBookingId(this.responseText || '', 'xhr');
