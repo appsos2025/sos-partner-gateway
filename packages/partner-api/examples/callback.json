@@ -1,10 +1,10 @@
 {
   "booking_id": 1234,
-  "transaction_id": "txn_demo_001",
-  "partner_id": "caf_bari",
-  "amount_paid": 50.0,
+  "transaction_id": "fh_txn_20260417_001",
+  "partner_id": "family_happy",
+  "amount_paid": 150.0,
   "currency": "EUR",
-  "payment_provider": "stripe",
-  "external_reference": "pi_demo_001",
-  "email": "cliente@example.com"
+  "payment_provider": "family_happy_pay",
+  "external_reference": "FH-PAY-20260417-001",
+  "email": "maria.rossi@example.com"
 }

@@ -86,6 +86,7 @@ class SOS_PG_Plugin {
             // Shortcode [sos_partner_prenota] per embed booking button su portali propri.
             add_shortcode('sos_partner_prenota', [$this, 'shortcode_partner_prenota']);
 
+            add_action('admin_post_sos_pg_block_ip', [$this, 'handle_block_ip']);
             add_action('admin_post_sos_pg_unlock_ip', [$this, 'handle_unlock_ip']);
             add_action('admin_post_sos_pg_clear_logs', [$this, 'handle_clear_logs']);
             add_action('admin_post_sos_pg_save_routes', [$this, 'handle_save_routes']);
@@ -733,6 +734,231 @@ class SOS_PG_Plugin {
         return '/partner-completion';
     }
 
+    private function get_environment_type_from_host($host) {
+        $host = strtolower(trim((string) $host));
+
+        if ($host === '') {
+            return 'unknown';
+        }
+
+        if (in_array($host, ['localhost', '127.0.0.1', '::1'], true)
+            || preg_match('/(^|\.)localhost$|(^|\.)local$|(^|\.)test$|(^|\.)invalid$/', $host)) {
+            return 'local';
+        }
+
+        foreach (['staging', 'stage', 'dev', 'preview', 'qa', 'uat', 'sandbox', 'demo'] as $token) {
+            if (strpos($host, $token) !== false) {
+                return 'staging';
+            }
+        }
+
+        return 'production';
+    }
+
+    private function describe_environment_type($type) {
+        switch ((string) $type) {
+            case 'local':
+                return 'locale';
+            case 'staging':
+                return 'staging/dev';
+            case 'production':
+                return 'produzione';
+            case 'missing':
+                return 'non configurato';
+            default:
+                return 'non determinato';
+        }
+    }
+
+    private function get_url_environment_info($url) {
+        $url = trim((string) $url);
+
+        if ($url === '') {
+            return [
+                'url' => '',
+                'host' => '',
+                'path' => '',
+                'type' => 'missing',
+                'type_label' => $this->describe_environment_type('missing'),
+                'is_valid' => false,
+                'is_https' => false,
+            ];
+        }
+
+        $host = (string) parse_url($url, PHP_URL_HOST);
+        $path = (string) parse_url($url, PHP_URL_PATH);
+        $scheme = strtolower((string) parse_url($url, PHP_URL_SCHEME));
+        $type = $this->get_environment_type_from_host($host);
+
+        return [
+            'url' => $url,
+            'host' => $host,
+            'path' => $path,
+            'type' => $type,
+            'type_label' => $this->describe_environment_type($type),
+            'is_valid' => (bool) wp_http_validate_url($url),
+            'is_https' => $scheme === 'https',
+        ];
+    }
+
+    private function should_warn_environment_mismatch(array $current, array $target) {
+        if (empty($current['is_valid']) || empty($target['is_valid'])) {
+            return false;
+        }
+
+        if (in_array($current['type'], ['unknown', 'missing'], true) || in_array($target['type'], ['unknown', 'missing'], true)) {
+            return false;
+        }
+
+        return (string) $current['type'] !== (string) $target['type'];
+    }
+
+    private function is_non_local_http_url(array $info) {
+        if (empty($info['is_valid'])) {
+            return false;
+        }
+
+        if (!empty($info['is_https'])) {
+            return false;
+        }
+
+        return !in_array($info['type'], ['local', 'missing'], true);
+    }
+
+    private function collect_environment_report($scope = 'settings', array $partner_configs = []) {
+        $settings = $this->get_settings();
+        $site_info = $this->get_url_environment_info(home_url('/'));
+        $callback_info = $this->get_url_environment_info(home_url($this->current_payment_callback_path() . '/'));
+        $completion_info = $this->get_url_environment_info(home_url($this->current_completion_path() . '/'));
+
+        $summary = [
+            'Sito corrente' => $site_info['url'],
+            'Tipo ambiente' => $site_info['type_label'],
+            'Callback URL effettivo' => $callback_info['url'],
+            'Completion URL effettivo' => $completion_info['url'],
+        ];
+
+        $warnings = [];
+        $add_warning = function($message) use (&$warnings) {
+            $message = trim((string) $message);
+            if ($message !== '') {
+                $warnings[$message] = $message;
+            }
+        };
+
+        if ($this->is_non_local_http_url($callback_info)) {
+            $add_warning('L\'URL callback effettivo usa HTTP e non HTTPS.');
+        }
+
+        if ($this->is_non_local_http_url($completion_info)) {
+            $add_warning('L\'URL completion effettivo usa HTTP e non HTTPS.');
+        }
+
+        $partner_callback_info = $this->get_url_environment_info((string) ($settings['partner_callback_url'] ?? ''));
+        if ($partner_callback_info['url'] !== '') {
+            $summary['Callback partner configurato'] = $partner_callback_info['url'] . ' [' . $partner_callback_info['type_label'] . ']';
+
+            if (!$partner_callback_info['is_valid']) {
+                $add_warning('partner_callback_url non è una URL valida.');
+            } else {
+                if ($this->is_non_local_http_url($partner_callback_info)) {
+                    $add_warning('partner_callback_url usa HTTP e non HTTPS.');
+                }
+
+                if ($this->should_warn_environment_mismatch($site_info, $partner_callback_info)) {
+                    $add_warning('partner_callback_url sembra puntare a un ambiente ' . $partner_callback_info['type_label'] . ' mentre questo sito appare in ' . $site_info['type_label'] . '.');
+                }
+
+                $current_callback_path = untrailingslashit((string) $callback_info['path']);
+                $partner_callback_path = untrailingslashit((string) $partner_callback_info['path']);
+                if ($current_callback_path !== '' && $partner_callback_path !== '' && $partner_callback_path !== $current_callback_path) {
+                    $add_warning('Il path configurato in partner_callback_url non coincide con il path callback attivo di questo ambiente.');
+                }
+            }
+        }
+
+        if ($scope === 'partner_configs') {
+            $webhooks = $this->get_partner_webhooks();
+            if (!is_array($webhooks)) {
+                $webhooks = [];
+            }
+
+            foreach ($webhooks as $partner_id => $cfg) {
+                $url = is_array($cfg) ? (string) ($cfg['url'] ?? '') : '';
+                if ($url === '') {
+                    continue;
+                }
+
+                $info = $this->get_url_environment_info($url);
+                if (!$info['is_valid']) {
+                    $add_warning('Webhook URL del partner "' . $partner_id . '" non è valida.');
+                    continue;
+                }
+
+                if ($this->is_non_local_http_url($info)) {
+                    $add_warning('Webhook URL del partner "' . $partner_id . '" usa HTTP e non HTTPS.');
+                }
+
+                if ($this->should_warn_environment_mismatch($site_info, $info)) {
+                    $add_warning('Webhook URL del partner "' . $partner_id . '" sembra puntare a un ambiente ' . $info['type_label'] . ' mentre questo sito appare in ' . $site_info['type_label'] . '.');
+                }
+            }
+
+            if (empty($partner_configs) && $this->settings_helper && method_exists($this->settings_helper, 'get_partner_configs_option')) {
+                $partner_configs = $this->settings_helper->get_partner_configs_option();
+            }
+
+            if (is_array($partner_configs)) {
+                foreach ($partner_configs as $partner_id => $cfg) {
+                    $completion_return_url = is_array($cfg) ? (string) ($cfg['completion_return_url'] ?? '') : '';
+                    if ($completion_return_url === '') {
+                        continue;
+                    }
+
+                    $info = $this->get_url_environment_info($completion_return_url);
+                    if (!$info['is_valid']) {
+                        $add_warning('Completion return URL del partner "' . $partner_id . '" non è valida.');
+                        continue;
+                    }
+
+                    if ($this->is_non_local_http_url($info)) {
+                        $add_warning('Completion return URL del partner "' . $partner_id . '" usa HTTP e non HTTPS.');
+                    }
+
+                    if ($this->should_warn_environment_mismatch($site_info, $info)) {
+                        $add_warning('Completion return URL del partner "' . $partner_id . '" sembra puntare a un ambiente ' . $info['type_label'] . ' mentre questo sito appare in ' . $site_info['type_label'] . '.');
+                    }
+                }
+            }
+        }
+
+        return [
+            'summary' => $summary,
+            'warnings' => array_values($warnings),
+        ];
+    }
+
+    private function render_environment_warning_panel($scope = 'settings', array $partner_configs = []) {
+        $report = $this->collect_environment_report($scope, $partner_configs);
+
+        echo '<div class="notice notice-info inline"><p><strong>Riepilogo ambiente</strong></p><ul style="margin:0 0 0 18px;list-style:disc;">';
+        foreach ($report['summary'] as $label => $value) {
+            if ((string) $value === '') {
+                continue;
+            }
+            echo '<li><strong>' . esc_html($label) . ':</strong> <code>' . esc_html((string) $value) . '</code></li>';
+        }
+        echo '</ul><p class="description" style="margin-top:8px;">Questi controlli sono solo informativi: non bloccano il salvataggio e non modificano i flussi runtime.</p></div>';
+
+        if (!empty($report['warnings'])) {
+            foreach ($report['warnings'] as $warning) {
+                echo '<div class="notice notice-warning inline"><p>' . esc_html($warning) . '</p></div>';
+            }
+        } else {
+            echo '<div class="notice notice-success inline"><p>Nessun mismatch ambiente evidente rilevato nelle URL configurate per questa sezione.</p></div>';
+        }
+    }
+
     public function get_partner_completion_url($booking_id, array $args = []) {
         $booking_id = (int) $booking_id;
         if ($booking_id <= 0) {
@@ -1222,6 +1448,12 @@ class SOS_PG_Plugin {
         return 'sos_pg_fail_long_' . md5($ip);
     }
 
+    private function partner_login_ok_throttle_key($email, $ip) {
+        $email = strtolower(trim((string) $email));
+        $ip = trim((string) $ip);
+        return 'sos_pg_partner_login_ok_' . md5($email . '|' . $ip);
+    }
+
     private function public_key_resource($partner_id = '') {
         // Partner login must verify against partner-specific public key only
         if ($partner_id !== '') {
@@ -1384,6 +1616,130 @@ class SOS_PG_Plugin {
         }
     }
 
+    private function get_partner_identity_context_key($partner_id, $email) {
+        $partner_key = $this->normalize_partner_id_key((string) $partner_id);
+        $email = sanitize_email((string) $email);
+
+        if ($partner_key === '' || $email === '') {
+            return '';
+        }
+
+        return 'sos_pg_partner_identity_' . md5($partner_key . '|' . strtolower($email));
+    }
+
+    public function stash_partner_identity_context($partner_id, array $identity = []) {
+        $partner_id = sanitize_text_field((string) $partner_id);
+        $email = sanitize_email((string) ($identity['email'] ?? ''));
+        $cache_key = $this->get_partner_identity_context_key($partner_id, $email);
+
+        if ($cache_key === '') {
+            return false;
+        }
+
+        $first_name = sanitize_text_field((string) ($identity['first_name'] ?? ''));
+        $last_name = sanitize_text_field((string) ($identity['last_name'] ?? ''));
+        $phone = sanitize_text_field((string) ($identity['phone'] ?? ''));
+        $customer_name = sanitize_text_field((string) ($identity['customer_name'] ?? trim($first_name . ' ' . $last_name)));
+
+        set_transient($cache_key, [
+            'email' => $email,
+            'first_name' => $first_name,
+            'last_name' => $last_name,
+            'phone' => $phone,
+            'customer_name' => $customer_name,
+        ], 2 * HOUR_IN_SECONDS);
+
+        $this->log_event('INFO', 'PARTNER_IDENTITY_PROPAGATION', [
+            'partner_id' => $partner_id,
+            'context' => [
+                'stage' => 'embedded_create',
+                'email_present' => $email !== '',
+                'first_name_present' => $first_name !== '',
+                'last_name_present' => $last_name !== '',
+                'phone_present' => $phone !== '',
+            ],
+        ]);
+
+        return true;
+    }
+
+    private function load_partner_identity_context($partner_id, $email, $delete_after_read = false) {
+        $cache_key = $this->get_partner_identity_context_key($partner_id, $email);
+        if ($cache_key === '') {
+            return [];
+        }
+
+        $stored = get_transient($cache_key);
+        if ($delete_after_read) {
+            delete_transient($cache_key);
+        }
+
+        return is_array($stored) ? $stored : [];
+    }
+
+    private function apply_partner_identity_context_to_user($user_id, $partner_id, $email) {
+        $user_id = absint($user_id);
+        if ($user_id <= 0) {
+            return [];
+        }
+
+        $stored = $this->load_partner_identity_context($partner_id, $email, true);
+
+        $existing_first_name = (string) get_user_meta($user_id, 'first_name', true);
+        $existing_last_name = (string) get_user_meta($user_id, 'last_name', true);
+        $existing_phone = (string) get_user_meta($user_id, 'billing_phone', true);
+        if ($existing_phone === '') {
+            $existing_phone = (string) get_user_meta($user_id, 'phone', true);
+        }
+        $existing_customer_name = (string) get_user_meta($user_id, 'sos_pg_partner_customer_name', true);
+
+        $first_name = $this->prefer_non_empty_value($stored['first_name'] ?? '', $existing_first_name);
+        $last_name = $this->prefer_non_empty_value($stored['last_name'] ?? '', $existing_last_name);
+        $phone = $this->prefer_non_empty_value($stored['phone'] ?? '', $existing_phone);
+        $customer_name = $this->prefer_non_empty_value($stored['customer_name'] ?? trim($first_name . ' ' . $last_name), $existing_customer_name);
+
+        if ($first_name !== '') {
+            update_user_meta($user_id, 'first_name', $first_name);
+            update_user_meta($user_id, 'sos_pg_partner_first_name', $first_name);
+        }
+        if ($last_name !== '') {
+            update_user_meta($user_id, 'last_name', $last_name);
+            update_user_meta($user_id, 'sos_pg_partner_last_name', $last_name);
+        }
+        if ($phone !== '') {
+            update_user_meta($user_id, 'billing_phone', $phone);
+            update_user_meta($user_id, 'phone', $phone);
+            update_user_meta($user_id, 'sos_pg_partner_phone', $phone);
+        }
+        if ($customer_name !== '') {
+            update_user_meta($user_id, 'sos_pg_partner_customer_name', $customer_name);
+        }
+
+        $context_flags = [
+            'email_present' => $email !== '',
+            'first_name_present' => $first_name !== '',
+            'last_name_present' => $last_name !== '',
+            'phone_present' => $phone !== '',
+        ];
+
+        $this->log_event('INFO', 'PARTNER_IDENTITY_PROPAGATION', [
+            'partner_id' => $partner_id,
+            'context' => array_merge(['stage' => 'handoff_login'], $context_flags),
+        ]);
+
+        $this->log_event('INFO', 'PARTNER_IDENTITY_PROPAGATION', [
+            'partner_id' => $partner_id,
+            'context' => array_merge(['stage' => 'partner_prefill'], $context_flags),
+        ]);
+
+        return [
+            'first_name' => $first_name,
+            'last_name' => $last_name,
+            'phone' => $phone,
+            'customer_name' => $customer_name,
+        ];
+    }
+
     private function register_fail($reason, $partner_id = '', $email = '') {
         $settings = $this->get_settings();
         $ip = $this->get_ip();
@@ -1435,7 +1791,7 @@ class SOS_PG_Plugin {
     public function handle_partner_login() {
         $endpoint = $this->current_endpoint_path();
         $request_path = $this->current_request_path();
-        $timestamp_window = 3600;
+        $timestamp_window = 120;
 
         if ($request_path !== $endpoint && $request_path !== $endpoint . '/') {
             return;
@@ -1486,13 +1842,13 @@ class SOS_PG_Plugin {
         error_log('[SOS SSO] handle_partner_login partner_id=' . $partner_id . ' requested_return_url=' . $partner_return_url);
 
         if ($partner_id === '') {
-            $this->register_fail('partner_id mancante');
+            $this->register_fail('missing_partner_id');
             status_header(400);
             exit('Partner non valido');
         }
 
         if ($email === '' || !is_email($email)) {
-            $this->register_fail('email non valida', $partner_id, $email);
+            $this->register_fail('invalid_email', $partner_id, $email);
             status_header(400);
             exit('Email non valida');
         }
@@ -1502,26 +1858,27 @@ class SOS_PG_Plugin {
             $this->log_event('WARN', 'PARTNER_LOGIN_TIMESTAMP_INVALID', [
                 'partner_id' => $partner_id,
                 'email' => $email,
-                'reason' => 'invalid_timestamp',
+                'reason' => 'timestamp_expired',
                 'context' => [
                     'incoming_timestamp' => (int) $timestamp,
                     'server_timestamp' => $server_timestamp,
                     'skew_seconds' => abs($server_timestamp - (int) $timestamp),
+                    'allowed_window_seconds' => $timestamp_window,
                 ],
             ]);
-            $this->register_fail('timestamp scaduto', $partner_id, $email);
+            $this->register_fail('timestamp_expired', $partner_id, $email);
             status_header(403);
             exit('Richiesta scaduta');
         }
 
         if ($nonce === '') {
-            $this->register_fail('nonce mancante', $partner_id, $email);
+            $this->register_fail('replay_nonce', $partner_id, $email);
             status_header(400);
             exit('Nonce mancante');
         }
 
         if ($signature === false || empty($signature)) {
-            $this->register_fail('firma mancante/non valida', $partner_id, $email);
+            $this->register_fail('invalid_signature', $partner_id, $email);
             status_header(400);
             exit('Firma non valida');
         }
@@ -1535,7 +1892,7 @@ class SOS_PG_Plugin {
                 'partner_id' => $partner_id,
                 'email' => $email,
                 'ip' => $ip,
-                'reason' => 'Chiave pubblica non configurata o non valida',
+                'reason' => $has_partner_key ? 'public_key_invalid' : 'public_key_missing',
                 'user_agent' => $ua,
             ]);
             status_header(500);
@@ -1547,7 +1904,7 @@ class SOS_PG_Plugin {
         $ok = openssl_verify($message, $signature, $public_key, OPENSSL_ALGO_SHA256);
 
         if ($ok !== 1) {
-            $this->register_fail('firma non valida', $partner_id, $email);
+            $this->register_fail('invalid_signature', $partner_id, $email);
             status_header(403);
             exit('Firma non valida');
         }
@@ -1631,6 +1988,10 @@ class SOS_PG_Plugin {
         update_user_meta($user->ID, 'sos_pg_partner_id', $partner_id);
         update_user_meta($user->ID, 'sos_pg_partner_last_login', time());
         update_user_meta($user->ID, 'sos_pg_partner_target_page', $redirect_url);
+        $identity_context = $this->apply_partner_identity_context_to_user($user->ID, $partner_id, $email);
+        $first_name = sanitize_text_field((string) ($identity_context['first_name'] ?? ''));
+        $last_name = sanitize_text_field((string) ($identity_context['last_name'] ?? ''));
+        $phone = sanitize_text_field((string) ($identity_context['phone'] ?? ''));
         if ($partner_return_url !== '') {
             update_user_meta($user->ID, 'sos_pg_partner_return_url', $partner_return_url);
         } else {
@@ -1656,17 +2017,21 @@ class SOS_PG_Plugin {
         delete_transient($this->fail_long_key($ip));
         delete_transient($this->ban_key($ip));
 
-        $this->log_event('INFO', 'PARTNER_LOGIN_OK', [
-            'partner_id' => $partner_id,
-            'email' => $email,
-            'ip' => $ip,
-            'reason' => $is_new_user ? 'new_user' : 'existing_user',
-            'user_agent' => $ua,
-            'context' => [
-                'timestamp' => $timestamp,
-                'redirect' => $redirect_url,
-            ],
-        ]);
+        $ok_log_key = $this->partner_login_ok_throttle_key($email, $ip);
+        if (!get_transient($ok_log_key)) {
+            $this->log_event('INFO', 'PARTNER_LOGIN_OK', [
+                'partner_id' => $partner_id,
+                'email' => $email,
+                'ip' => $ip,
+                'reason' => $is_new_user ? 'new_user' : 'existing_user',
+                'user_agent' => $ua,
+                'context' => [
+                    'timestamp' => $timestamp,
+                    'redirect' => $redirect_url,
+                ],
+            ]);
+            set_transient($ok_log_key, 1, 5 * MINUTE_IN_SECONDS);
+        }
 
         // Cookie di cortesia per frontend LatePoint se la sessione WP viene persa.
         setcookie('sos_pg_partner_id', $partner_id, time() + 4 * HOUR_IN_SECONDS, '/', '', is_ssl(), true);
@@ -1873,6 +2238,226 @@ class SOS_PG_Plugin {
         );
 
         return is_scalar($email) ? sanitize_email((string) $email) : '';
+    }
+
+    private function prefer_non_empty_value($incoming, $existing) {
+        $incoming = is_scalar($incoming) ? trim(sanitize_text_field((string) $incoming)) : '';
+        $existing = is_scalar($existing) ? trim(sanitize_text_field((string) $existing)) : '';
+
+        if ($incoming !== '') {
+            return $incoming;
+        }
+
+        if ($existing !== '') {
+            return $existing;
+        }
+
+        return '';
+    }
+
+    private function split_full_name_fallback($full_name) {
+        $full_name = is_scalar($full_name) ? trim(sanitize_text_field((string) $full_name)) : '';
+        if ($full_name === '') {
+            return [
+                'first_name' => '',
+                'last_name' => '',
+            ];
+        }
+
+        $parts = preg_split('/\s+/', $full_name);
+        if (!is_array($parts) || empty($parts)) {
+            return [
+                'first_name' => $full_name,
+                'last_name' => '',
+            ];
+        }
+
+        $first_name = trim((string) array_shift($parts));
+        $last_name = trim(implode(' ', $parts));
+
+        return [
+            'first_name' => $first_name,
+            'last_name' => $last_name,
+        ];
+    }
+
+    private function resolve_customer_identity_fields($payload, $user_id = 0, $context = array()) {
+        $normalize = static function($value) {
+            if (!is_scalar($value)) {
+                return '';
+            }
+
+            $value = trim(sanitize_text_field((string) $value));
+            return $value === '' ? '' : $value;
+        };
+
+        $first_non_empty = static function(array $candidates) use ($normalize) {
+            foreach ($candidates as $candidate) {
+                $value = $normalize($candidate);
+                if ($value !== '') {
+                    return $value;
+                }
+            }
+            return '';
+        };
+
+        $booking = (is_array($context) && array_key_exists('booking', $context)) ? $context['booking'] : null;
+        $user = $user_id > 0 ? get_userdata($user_id) : false;
+
+        $resolved = [
+            'first_name' => '',
+            'last_name' => '',
+            'phone' => '',
+            'sources' => [
+                'first_name' => 'missing',
+                'last_name' => 'missing',
+                'phone' => 'missing',
+            ],
+        ];
+
+        $payload_name = $first_non_empty([
+            $this->safe_get_nested($payload, ['customer', 'full_name']),
+            $this->safe_get($payload, 'customer_name'),
+            $this->safe_get($payload, 'full_name'),
+            $this->safe_get($payload, 'name'),
+            $this->safe_get($payload, 'display_name'),
+        ]);
+        $payload_name_parts = $this->split_full_name_fallback($payload_name);
+
+        $payload_first_name = $first_non_empty([
+            $this->safe_get_nested($payload, ['customer', 'first_name']),
+            $this->safe_get($payload, 'customer_first_name'),
+            $this->safe_get($payload, 'first_name'),
+            $this->safe_get($payload, 'firstname'),
+        ]);
+        if ($payload_first_name !== '') {
+            $resolved['first_name'] = $payload_first_name;
+            $resolved['sources']['first_name'] = 'partner_payload';
+        } elseif ($payload_name_parts['first_name'] !== '') {
+            $resolved['first_name'] = $payload_name_parts['first_name'];
+            $resolved['sources']['first_name'] = 'partner_payload_name';
+        }
+
+        $payload_last_name = $first_non_empty([
+            $this->safe_get_nested($payload, ['customer', 'last_name']),
+            $this->safe_get($payload, 'customer_last_name'),
+            $this->safe_get($payload, 'last_name'),
+            $this->safe_get($payload, 'lastname'),
+        ]);
+        if ($payload_last_name !== '') {
+            $resolved['last_name'] = $payload_last_name;
+            $resolved['sources']['last_name'] = 'partner_payload';
+        } elseif ($payload_name_parts['last_name'] !== '') {
+            $resolved['last_name'] = $payload_name_parts['last_name'];
+            $resolved['sources']['last_name'] = 'partner_payload_name';
+        }
+
+        $payload_phone = $first_non_empty([
+            $this->safe_get_nested($payload, ['customer', 'phone']),
+            $this->safe_get($payload, 'customer_phone'),
+            $this->safe_get($payload, 'phone'),
+        ]);
+        if ($payload_phone !== '') {
+            $resolved['phone'] = $payload_phone;
+            $resolved['sources']['phone'] = 'partner_payload';
+        }
+
+        if ($user instanceof WP_User) {
+            $user_display_name_parts = $this->split_full_name_fallback($user->display_name);
+
+            if ($resolved['first_name'] === '') {
+                $user_first_name = $first_non_empty([
+                    $user->first_name,
+                    get_user_meta($user_id, 'first_name', true),
+                ]);
+                if ($user_first_name !== '') {
+                    $resolved['first_name'] = $user_first_name;
+                    $resolved['sources']['first_name'] = 'wp_user';
+                } elseif ($user_display_name_parts['first_name'] !== '') {
+                    $resolved['first_name'] = $user_display_name_parts['first_name'];
+                    $resolved['sources']['first_name'] = 'wp_user_display_name';
+                }
+            }
+
+            if ($resolved['last_name'] === '') {
+                $user_last_name = $first_non_empty([
+                    $user->last_name,
+                    get_user_meta($user_id, 'last_name', true),
+                ]);
+                if ($user_last_name !== '') {
+                    $resolved['last_name'] = $user_last_name;
+                    $resolved['sources']['last_name'] = 'wp_user';
+                } elseif ($user_display_name_parts['last_name'] !== '') {
+                    $resolved['last_name'] = $user_display_name_parts['last_name'];
+                    $resolved['sources']['last_name'] = 'wp_user_display_name';
+                }
+            }
+
+            if ($resolved['phone'] === '') {
+                $user_phone = $first_non_empty([
+                    get_user_meta($user_id, 'billing_phone', true),
+                    get_user_meta($user_id, 'phone', true),
+                    get_user_meta($user_id, 'mobile_phone', true),
+                ]);
+                if ($user_phone !== '') {
+                    $resolved['phone'] = $user_phone;
+                    $resolved['sources']['phone'] = 'wp_user';
+                }
+            }
+        }
+
+        $booking_name = $first_non_empty([
+            $this->safe_get_nested($booking, ['customer', 'full_name']),
+            $this->safe_get($booking, 'customer_name'),
+            $this->safe_get($booking, 'full_name'),
+            $this->safe_get($booking, 'name'),
+            $this->safe_get($booking, 'display_name'),
+        ]);
+        $booking_name_parts = $this->split_full_name_fallback($booking_name);
+
+        if ($resolved['first_name'] === '') {
+            $booking_first_name = $first_non_empty([
+                $this->safe_get_nested($booking, ['customer', 'first_name']),
+                $this->safe_get($booking, 'customer_first_name'),
+                $this->safe_get($booking, 'first_name'),
+            ]);
+            if ($booking_first_name !== '') {
+                $resolved['first_name'] = $booking_first_name;
+                $resolved['sources']['first_name'] = 'booking_meta';
+            } elseif ($booking_name_parts['first_name'] !== '') {
+                $resolved['first_name'] = $booking_name_parts['first_name'];
+                $resolved['sources']['first_name'] = 'booking_name_fallback';
+            }
+        }
+
+        if ($resolved['last_name'] === '') {
+            $booking_last_name = $first_non_empty([
+                $this->safe_get_nested($booking, ['customer', 'last_name']),
+                $this->safe_get($booking, 'customer_last_name'),
+                $this->safe_get($booking, 'last_name'),
+            ]);
+            if ($booking_last_name !== '') {
+                $resolved['last_name'] = $booking_last_name;
+                $resolved['sources']['last_name'] = 'booking_meta';
+            } elseif ($booking_name_parts['last_name'] !== '') {
+                $resolved['last_name'] = $booking_name_parts['last_name'];
+                $resolved['sources']['last_name'] = 'booking_name_fallback';
+            }
+        }
+
+        if ($resolved['phone'] === '') {
+            $booking_phone = $first_non_empty([
+                $this->safe_get_nested($booking, ['customer', 'phone']),
+                $this->safe_get($booking, 'customer_phone'),
+                $this->safe_get($booking, 'phone'),
+            ]);
+            if ($booking_phone !== '') {
+                $resolved['phone'] = $booking_phone;
+                $resolved['sources']['phone'] = 'booking_meta';
+            }
+        }
+
+        return $resolved;
     }
 
     private function build_partner_payment_completion_return_url($base_url, $partner_id, $booking_id, $record = null) {
@@ -2616,6 +3201,7 @@ class SOS_PG_Plugin {
         $msg = sanitize_text_field(wp_unslash($_GET['msg'] ?? ''));
         $map = [
             'saved'           => 'Impostazioni salvate.',
+            'blocked'         => 'IP bloccato correttamente.',
             'unlocked'        => 'IP sbloccato correttamente.',
             'ip_missing'      => 'IP mancante.',
             'cleared'         => 'Log svuotati.',
@@ -2900,12 +3486,20 @@ class SOS_PG_Plugin {
             echo '</td>';
             echo '<td>';
             if (!empty($log->ip)) {
+                echo '<div style="display:flex;flex-direction:column;gap:6px;">';
+                echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+                wp_nonce_field('sos_pg_block_ip');
+                echo '<input type="hidden" name="action" value="sos_pg_block_ip">';
+                echo '<input type="hidden" name="ip" value="' . esc_attr($log->ip) . '">';
+                echo '<button class="button button-small">Blocca IP</button>';
+                echo '</form>';
                 echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
                 wp_nonce_field('sos_pg_unlock_ip');
                 echo '<input type="hidden" name="action" value="sos_pg_unlock_ip">';
                 echo '<input type="hidden" name="ip" value="' . esc_attr($log->ip) . '">';
                 echo '<button class="button button-small">Sblocca IP</button>';
                 echo '</form>';
+                echo '</div>';
             } else {
                 echo '—';
             }
@@ -2932,6 +3526,7 @@ class SOS_PG_Plugin {
 
         echo '<div class="wrap"><h1>' . $title . '</h1>';
         $this->notice();
+        $this->render_environment_warning_panel('settings');
 
         echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
         wp_nonce_field('sos_pg_save_settings');
@@ -3011,7 +3606,7 @@ class SOS_PG_Plugin {
             }
             echo '</select></td></tr>';
 
-            echo '<tr><th>Debug logs sviluppo</th><td><label><input type="checkbox" name="debug_logging_enabled" value="1" ' . checked(!empty($settings['debug_logging_enabled']), true, false) . '> Attiva</label></td></tr>';
+            echo '<tr><th>Log debug/sviluppo</th><td><label><input type="checkbox" name="debug_logging_enabled" value="1" ' . checked(!empty($settings['debug_logging_enabled']), true, false) . '> Attiva</label><p class="description">Disattiva solo i log rumorosi di debug/sviluppo. I log critici di sicurezza e operativi restano attivi.</p></td></tr>';
 
             echo '<tr><th>Rate limit breve</th><td><input type="number" name="max_fail_short" value="' . esc_attr($settings['max_fail_short']) . '" min="1"> errori in <input type="number" name="window_short_minutes" value="' . esc_attr($settings['window_short_minutes']) . '" min="1"> minuti &rarr; ban <input type="number" name="ban_short_minutes" value="' . esc_attr($settings['ban_short_minutes']) . '" min="1"> minuti</td></tr>';
 
@@ -3100,6 +3695,7 @@ class SOS_PG_Plugin {
         }
 
         echo '<p>Configurazione per-partner. Espandi un blocco per modificarlo. Il blocco <em>Nuovo partner</em> è sempre aperto per inserimento rapido.</p>';
+        $this->render_environment_warning_panel('partner_configs', $configs);
 
         echo '<style>
             .sos-pg-partner-card { border: 1px solid #ccd0d4; background: #fff; margin-bottom: 12px; }
@@ -3703,6 +4299,8 @@ class SOS_PG_Plugin {
             echo '<div class="notice notice-error is-dismissible"><p>Errore invio callback: ' . esc_html($detail !== '' ? $detail : 'verifica log') . '.</p></div>';
         }
 
+        $this->render_environment_warning_panel('payment_test');
+
         echo '<p>Invia una richiesta firmata al callback pagamento per testare la chiusura della prenotazione.</p>';
         echo '<p><strong>URL callback:</strong> <code>' . esc_html($callback_url) . '</code></p>';
         echo '<p><strong>Secret:</strong> ' . ($settings['payment_callback_secret'] ? '<code>configurato</code>' : '<span style="color:#d63638;">manca</span>') . '</p>';
@@ -3783,6 +4381,32 @@ class SOS_PG_Plugin {
         // 'sos-partner-gateway-settings'. Redirecting to the wrong slug shows "Non autorizzato".
         $redirect_page = $settings['site_role'] === 'partner' ? 'sos-partner-gateway' : 'sos-partner-gateway-settings';
         wp_safe_redirect(add_query_arg(['page' => $redirect_page, 'msg' => 'saved'], admin_url('admin.php')));
+        exit;
+    }
+
+    public function handle_block_ip() {
+        if (!current_user_can('manage_options')) {
+            wp_die('Non autorizzato');
+        }
+
+        check_admin_referer('sos_pg_block_ip');
+
+        $ip = sanitize_text_field(wp_unslash($_POST['ip'] ?? ''));
+        if ($ip === '') {
+            wp_safe_redirect(add_query_arg(['page' => 'sos-partner-gateway', 'msg' => 'ip_missing'], admin_url('admin.php')));
+            exit;
+        }
+
+        $settings = $this->get_settings();
+        $ban_minutes = max(1, (int) ($settings['ban_long_minutes'] ?? 1440));
+        set_transient($this->ban_key($ip), 1, $ban_minutes * MINUTE_IN_SECONDS);
+
+        $this->log_event('WARN', 'PARTNER_LOGIN_MANUAL_BLOCK', [
+            'ip' => $ip,
+            'reason' => 'Blocco manuale da admin | durata: ' . $ban_minutes . ' minuti',
+        ]);
+
+        wp_safe_redirect(add_query_arg(['page' => 'sos-partner-gateway', 'msg' => 'blocked'], admin_url('admin.php')));
         exit;
     }
 
@@ -4331,31 +4955,128 @@ class SOS_PG_Plugin {
         if ($customer_email === '') {
             $customer_email = $this->safe_get($booking, 'customer_email');
         }
-        $customer_phone = $this->safe_get_nested($booking, ['customer', 'phone']);
-        $customer_name = $this->safe_get_nested($booking, ['customer', 'full_name']);
-        $customer_first_name = $this->safe_get_nested($booking, ['customer', 'first_name']);
-        $customer_last_name = $this->safe_get_nested($booking, ['customer', 'last_name']);
+
+        $identity = $this->resolve_customer_identity_fields($cart, get_current_user_id(), [
+            'booking' => $booking,
+        ]);
+
+        $incoming_customer_phone = (string) ($identity['phone'] ?? '');
+        $incoming_customer_first_name = (string) ($identity['first_name'] ?? '');
+        $incoming_customer_last_name = (string) ($identity['last_name'] ?? '');
+        $incoming_customer_name = trim($incoming_customer_first_name . ' ' . $incoming_customer_last_name);
+
+        $existing_customer_phone = trim((string) $this->safe_get_nested($booking, ['customer', 'phone']));
+        if ($existing_customer_phone === '') {
+            $existing_customer_phone = trim((string) $this->safe_get($booking, 'customer_phone'));
+        }
+        if ($existing_customer_phone === '') {
+            $existing_customer_phone = trim((string) $this->safe_get($booking, 'phone'));
+        }
+
+        $existing_customer_first_name = trim((string) $this->safe_get_nested($booking, ['customer', 'first_name']));
+        if ($existing_customer_first_name === '') {
+            $existing_customer_first_name = trim((string) $this->safe_get($booking, 'customer_first_name'));
+        }
+        if ($existing_customer_first_name === '') {
+            $existing_customer_first_name = trim((string) $this->safe_get($booking, 'first_name'));
+        }
+
+        $existing_customer_last_name = trim((string) $this->safe_get_nested($booking, ['customer', 'last_name']));
+        if ($existing_customer_last_name === '') {
+            $existing_customer_last_name = trim((string) $this->safe_get($booking, 'customer_last_name'));
+        }
+        if ($existing_customer_last_name === '') {
+            $existing_customer_last_name = trim((string) $this->safe_get($booking, 'last_name'));
+        }
+
+        $existing_customer_name = trim((string) $this->safe_get_nested($booking, ['customer', 'full_name']));
+        if ($existing_customer_name === '') {
+            $existing_customer_name = trim((string) $this->safe_get($booking, 'customer_name'));
+        }
+
+        $customer_phone = $this->prefer_non_empty_value($incoming_customer_phone, $existing_customer_phone);
+        $customer_first_name = $this->prefer_non_empty_value($incoming_customer_first_name, $existing_customer_first_name);
+        $customer_last_name = $this->prefer_non_empty_value($incoming_customer_last_name, $existing_customer_last_name);
+        $customer_name = $this->prefer_non_empty_value(trim($customer_first_name . ' ' . $customer_last_name), $existing_customer_name);
+
+        $identity_protected_fields = [
+            'first_name' => [$incoming_customer_first_name, $existing_customer_first_name],
+            'last_name' => [$incoming_customer_last_name, $existing_customer_last_name],
+            'phone' => [$incoming_customer_phone, $existing_customer_phone],
+            'customer_name' => [$incoming_customer_name, $existing_customer_name],
+        ];
+        foreach ($identity_protected_fields as $field => $values) {
+            $incoming_value = is_array($values) && array_key_exists(0, $values) ? (string) $values[0] : '';
+            $existing_value = is_array($values) && array_key_exists(1, $values) ? (string) $values[1] : '';
+            if (trim($incoming_value) === '' && trim($existing_value) !== '') {
+                $this->log_event('INFO', 'PARTNER_BOOKING_IDENTITY_KEEP_EXISTING', [
+                    'partner_id' => $partner_id,
+                    'context' => [
+                        'booking_id' => $booking_id,
+                        'field' => $field,
+                        'incoming_present' => false,
+                        'existing_present' => true,
+                        'action' => 'kept_existing',
+                    ],
+                ]);
+            }
+        }
+
         $service_name = $this->get_booking_service_name($service_id, $booking);
         $booking_datetime = $this->build_booking_datetime_value($start_date, $start_time);
         $external_reference = $this->resolve_booking_external_reference($partner_id, $booking_id, $booking, $customer_email);
         $amount = $partner_charge !== null ? (float) $partner_charge : $total;
+
+        $this->log_event('INFO', 'PARTNER_BOOKING_IDENTITY_RESOLVED', [
+            'partner_id' => $partner_id,
+            'context' => [
+                'booking_id' => $booking_id,
+                'first_name_source' => (string) ($identity['sources']['first_name'] ?? 'missing'),
+                'last_name_source' => (string) ($identity['sources']['last_name'] ?? 'missing'),
+                'phone_source' => (string) ($identity['sources']['phone'] ?? 'missing'),
+                'first_name_present' => $customer_first_name !== '',
+                'last_name_present' => $customer_last_name !== '',
+                'phone_present' => $customer_phone !== '',
+            ],
+        ]);
 
         $this->log_event('INFO', 'BOOKING_PARTNER_HOOK', [
             'partner_id' => $partner_id,
             'context' => [
                 'booking_id' => $booking_id,
                 'status' => $status,
+                'customer_email_present' => $customer_email !== '',
+                'first_name_present' => $customer_first_name !== '',
+                'last_name_present' => $customer_last_name !== '',
+                'phone_present' => $customer_phone !== '',
+                'external_reference_present' => $external_reference !== '',
+                'amount_present' => ((string) $this->safe_get($booking, 'total')) !== '' || $partner_charge !== null,
+                'result' => 'start',
             ],
         ]);
 
         // Scrivi dati partner nella tabella custom SOS (sorgente unica dalla Fase 3).
         if ($booking_id && $partner_id) {
-            $this->upsert_partner_booking_record([
+            $persist_result = $this->upsert_partner_booking_record([
                 'lp_booking_id'  => $booking_id,
                 'partner_id'     => $partner_id,
                 'location_id'    => $location_id,
                 'payment_external_ref' => $external_reference,
                 'partner_charge' => $partner_charge,
+            ]);
+
+            $this->log_event($persist_result ? 'INFO' : 'WARN', 'PARTNER_BOOKING_RECORD_PERSIST', [
+                'partner_id' => $partner_id,
+                'context' => [
+                    'booking_id' => $booking_id,
+                    'customer_email_present' => $customer_email !== '',
+                    'first_name_present' => $customer_first_name !== '',
+                    'last_name_present' => $customer_last_name !== '',
+                    'phone_present' => $customer_phone !== '',
+                    'external_reference_present' => $external_reference !== '',
+                    'amount_present' => ((string) $this->safe_get($booking, 'total')) !== '' || $partner_charge !== null,
+                    'result' => $persist_result ? 'success' : 'failed',
+                ],
             ]);
         }
 
@@ -4438,7 +5159,13 @@ class SOS_PG_Plugin {
                 'booking_id' => $payload['booking_id'] ?? null,
                 'url' => $url,
                 'config_source' => (string) ($webhook['source'] ?? ''),
-                'payload' => $payload,
+                'customer_email_present' => !empty($payload['customer_email']) || !empty($payload['email']),
+                'first_name_present' => !empty($payload['customer_first_name']),
+                'last_name_present' => !empty($payload['customer_last_name']),
+                'phone_present' => !empty($payload['customer_phone']),
+                'external_reference_present' => !empty($payload['external_reference']),
+                'amount_present' => array_key_exists('amount', $payload),
+                'result' => 'prepared',
             ],
         ]);
 
@@ -4452,7 +5179,16 @@ class SOS_PG_Plugin {
             $this->log_event('ERROR', 'WEBHOOK_PARTNER_FAIL', [
                 'partner_id' => $partner_id,
                 'reason' => $resp->get_error_message(),
-                'context' => $payload,
+                'context' => [
+                    'booking_id' => $payload['booking_id'] ?? null,
+                    'customer_email_present' => !empty($payload['customer_email']) || !empty($payload['email']),
+                    'first_name_present' => !empty($payload['customer_first_name']),
+                    'last_name_present' => !empty($payload['customer_last_name']),
+                    'phone_present' => !empty($payload['customer_phone']),
+                    'external_reference_present' => !empty($payload['external_reference']),
+                    'amount_present' => array_key_exists('amount', $payload),
+                    'result' => 'request_error',
+                ],
             ]);
             $this->log_event('ERROR', 'WEBHOOK_BOOKING_ERROR', [
                 'partner_id' => $partner_id,
@@ -4519,12 +5255,6 @@ class SOS_PG_Plugin {
         }
 
         $settings = $this->get_settings();
-        $secret = $settings['payment_callback_secret'];
-
-        if ($secret === '') {
-            status_header(403);
-            exit('Callback non attivato');
-        }
 
         $raw = file_get_contents('php://input');
         $data = json_decode($raw, true);
@@ -4543,6 +5273,51 @@ class SOS_PG_Plugin {
         $external_reference = sanitize_text_field($data['external_reference'] ?? '');
         $email = sanitize_email((string) ($data['email'] ?? ''));
 
+        $global_secret = trim((string) ($settings['payment_callback_secret'] ?? ''));
+        $partner_secret = '';
+        $secret_source = 'none';
+
+        if ($partner_id !== '' && $this->partner_registry) {
+            $partner_cfg = $this->partner_registry->get_partner_config($partner_id);
+            if (is_array($partner_cfg)) {
+                $partner_secret = trim((string) ($partner_cfg['callback_secret'] ?? ''));
+            }
+        }
+
+        if ($partner_secret !== '') {
+            $secret = $partner_secret;
+            $secret_source = 'partner';
+        } else {
+            $secret = $global_secret;
+            $secret_source = $global_secret !== '' ? 'global' : 'none';
+        }
+
+        $this->log_event('INFO', 'PAYMENT_CALLBACK_SECRET_RESOLVED', [
+            'partner_id' => $partner_id,
+            'reason' => '',
+            'context' => [
+                'booking_id' => $booking_id,
+                'transaction_id' => $transaction_id,
+                'secret_source' => $secret_source,
+                'partner_secret_configured' => $partner_secret !== '',
+                'global_secret_configured' => $global_secret !== '',
+            ],
+        ]);
+
+        if ($secret === '') {
+            $this->log_event('WARN', 'PAYMENT_CALLBACK_SECRET_MISSING', [
+                'partner_id' => $partner_id,
+                'reason' => 'missing_callback_secret',
+                'context' => [
+                    'booking_id' => $booking_id,
+                    'transaction_id' => $transaction_id,
+                    'secret_source' => $secret_source,
+                ],
+            ]);
+            status_header(403);
+            exit('Callback non attivato');
+        }
+
         $this->log_event('INFO', 'PAYMENT_CALLBACK_RECEIVED', [
             'partner_id' => $partner_id,
             'reason' => '',
@@ -4558,10 +5333,14 @@ class SOS_PG_Plugin {
 
         $sig = $_SERVER['HTTP_X_SOSPG_SIGNATURE'] ?? '';
         $calc = hash_hmac('sha256', (string) $raw, (string) $secret);
-        if (!$sig || !hash_equals($calc, $sig)) {
+        $is_signature_valid = is_string($sig) && $sig !== '' && hash_equals($calc, $sig);
+        if (!$is_signature_valid) {
             $invalid_hmac_payload = [
                 'reason' => 'invalid_hmac',
-                'context' => [],
+                'context' => [
+                    'secret_source' => $secret_source,
+                    'validation_result' => 'failed',
+                ],
             ];
             if ($partner_id !== '') {
                 $invalid_hmac_payload['partner_id'] = $partner_id;
@@ -4576,6 +5355,17 @@ class SOS_PG_Plugin {
             status_header(401);
             exit('Firma non valida');
         }
+
+        $this->log_event('INFO', 'PAYMENT_CALLBACK_HMAC_VALID', [
+            'partner_id' => $partner_id,
+            'reason' => '',
+            'context' => [
+                'booking_id' => $booking_id,
+                'transaction_id' => $transaction_id,
+                'secret_source' => $secret_source,
+                'validation_result' => 'passed',
+            ],
+        ]);
 
         if (!$booking_id) {
             status_header(400);
@@ -4753,6 +5543,45 @@ class SOS_PG_Plugin {
             ]);
             status_header(409);
             exit('Conflitto su external_reference');
+        }
+
+        // ── 7. Business gate (warning-only): the callback should ideally target bookings
+        // explicitly managed economically by the partner. To preserve legacy behavior,
+        // this block only logs an inconsistency and never blocks the callback.
+        $partner_charge_detected = null;
+        if ($sos_record !== null && isset($sos_record->partner_charge) && $sos_record->partner_charge !== null) {
+            $partner_charge_detected = (float) $sos_record->partner_charge;
+        }
+
+        $pay_on_partner_detected = false;
+        $marker_source = 'none';
+        $is_partner_managed_booking = false;
+
+        if ($partner_charge_detected !== null && $partner_charge_detected > 0) {
+            $is_partner_managed_booking = true;
+            $marker_source = 'partner_charge';
+        } else {
+            $discount_config = $this->get_partner_discount_config($partner_id);
+            $pay_on_partner_detected = !empty($discount_config['pay_on_partner']);
+
+            if ($pay_on_partner_detected) {
+                $is_partner_managed_booking = true;
+                $marker_source = 'pay_on_partner';
+            }
+        }
+
+        if (!$is_partner_managed_booking) {
+            $this->log_event('WARN', 'PAYMENT_CALLBACK_BUSINESS_GATE_WARN', [
+                'partner_id' => $partner_id,
+                'reason' => 'booking_not_explicitly_partner_managed',
+                'context' => [
+                    'booking_id' => $booking_id,
+                    'transaction_id' => $transaction_id,
+                    'partner_charge' => $partner_charge_detected,
+                    'pay_on_partner' => $pay_on_partner_detected,
+                    'marker_source' => $marker_source,
+                ],
+            ]);
         }
 
         // Stato finale sempre gestito da LatePoint: fissiamo pending (o valore da impostazioni) e pagamento "paid".

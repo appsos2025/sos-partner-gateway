@@ -28,6 +28,27 @@ Verificare lo stato attuale funzionante.
 - option key esistenti restano leggibili
 - nessuna configurazione salvata viene persa
 
+## Flusso confermato da preservare
+- POST diretto a `/partner-login/` con firma valida
+- accesso alla pagina partner corretta dopo il redirect
+- creazione prenotazione nel browser lato partner
+- invio webhook `booking_created` al ricevitore partner
+- callback pagamento HMAC valida verso `/partner-payment-callback/`
+- aggiornamento finale booking a stato configurato, ad esempio `pagato`
+
+## Failure case da verificare
+- timestamp scaduto: richiesta rifiutata
+- signature non valida: richiesta rifiutata
+- replay nonce: richiesta rifiutata
+- callback HMAC errata: HTTP 401 atteso
+- partner/page non configurati: HTTP 404 atteso
+- IP in ban temporaneo: HTTP 429 atteso
+
+## Opzionale / non richiesto per Family+Happy
+- endpoint `/embedded-booking/create`
+- strategia `passthrough`
+- first_name, last_name, phone nel flusso partner diretto
+
 ## Nuove feature
 Ogni nuova feature deve avere:
 - test manuale dedicato

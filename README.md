@@ -1,12 +1,12 @@
 # SOS Partner Gateway
 
 Plugin WordPress per:
-- login partner firmato ECC su endpoint unico `/partner-login/`
-- protezione singole pagine partner
-- redirect dinamico alla pagina partner corretta
-- log integrati in database
-- ban / sblocco IP
-- configurazione centralizzata per partner pages
+- login partner firmato su endpoint unico `/partner-login/`
+- redirect dinamico alla pagina partner corretta dopo il login
+- webhook `booking_created` verso il ricevitore partner
+- callback pagamento HMAC su `/partner-payment-callback/`
+- log operativi e sicurezza integrati in database
+- rate limit, ban / sblocco IP e protezione replay nonce
 - base riusabile per qualsiasi partner / portale esterno
 
 ## Requisiti
@@ -77,14 +77,25 @@ openssl ec -in private.pem -pubout -out public.pem
 ```
 > **Attenzione**: conserva `private.pem` solo sul server del partner. Non committare mai i file PEM in un repository.
 
-## Flusso
-1. Il partner invia una POST firmata all'endpoint pubblico `/partner-login/`
-2. Il plugin verifica firma, timestamp, nonce e rate-limit
-3. L'utente viene creato o recuperato
-4. Il plugin salva `partner_id` e reindirizza alla pagina partner configurata
-5. La pagina partner è accessibile solo se l'utente è autenticato e ha il `partner_id` corretto
-6. Alla creazione booking LatePoint, il plugin invia un webhook per-partner con payload minimale e HMAC
-7. Il partner invia il callback di pagamento firmato per marcare la prenotazione come `payment_status=paid` e stato configurato
+## Flusso confermato
+1. Il partner prepara lato server una POST firmata verso l'endpoint pubblico `/partner-login/`
+2. I campi richiesti sono: `partner_id`, `payload` (email), `timestamp`, `nonce`, `signature`
+3. Il plugin verifica firma PEM, finestra temporale di 120 secondi, replay nonce e rate-limit IP
+4. L'utente WordPress viene creato o recuperato e il `partner_id` viene salvato nel profilo utente
+5. L'utente viene reindirizzato alla pagina partner configurata e completa la prenotazione nel browser
+6. Alla creazione booking LatePoint, il plugin risolve il partner e invia il webhook `booking_created` al ricevitore partner se configurato
+7. Il partner invia il callback di pagamento firmato al sito `main`, che aggiorna il booking LatePoint lato centrale marcando `payment_status=paid` e impostando lo stato finale configurato localmente, ad esempio `pagato`
+
+> Per partner come Family+Happy il flusso principale è diretto verso `/partner-login/`. L'endpoint embedded booking resta opzionale e non è richiesto per questo scenario.
+
+## Sicurezza e logging operativi
+- Firma partner verificata con chiave pubblica PEM configurata per il partner
+- Messaggio firmato atteso: `partner_id|email|timestamp|nonce`
+- Finestra timestamp attiva: 120 secondi
+- Protezione replay nonce attiva
+- Rate limit breve e lungo con ban temporaneo IP
+- Gli eventi critici di sicurezza e operativi restano loggati anche se i log debug/sviluppo sono disattivati
+- Il toggle log in admin riduce solo i log rumorosi di debug, non disattiva la tracciatura di fail, ban, blocked, unlock e successi critici
 
 ## Uso su più portali (multi-portal)
 Il plugin può essere installato su **qualsiasi sito WordPress con LatePoint** che vuole gestire partner esterni. Per ogni nuova installazione:
@@ -107,15 +118,26 @@ Ogni portale ha la propria chiave, propri partner e propri log — tutto isolato
 - `location_id` (ID della posizione LatePoint associata al partner, usato per differenziare i partner)
 - Logging: `BOOKING_PARTNER_HOOK`, `WEBHOOK_PARTNER_SENT`, `WEBHOOK_PARTNER_FAIL`, `WEBHOOK_PARTNER_SKIP_NO_URL`.
 
+### Comportamento reale verificato
+- Il webhook non è limitato in modo stretto al solo caso `pay_on_partner=true`.
+- Nel codice reale parte quando il booking risulta collegato a un partner valido e quel partner ha un `webhook_url` configurato.
+- Questo rende il flusso più permissivo di quanto si possa intuire leggendo solo la descrizione funzionale.
+
 ## Callback pagamento
 - Endpoint: slug configurabile in Impostazioni (default `/partner-payment-callback`)
 - Autenticazione: header `X-SOSPG-Signature` = HMAC SHA256 sul raw body JSON usando il secret configurato.
 - Payload minimo accettato:
 - `booking_id` (obbligatorio)
-- `status` (facoltativo, se assente usa `payment_success_status` configurato)
+- `status` (facoltativo; può essere inviato dal partner ma non è la sorgente di verità finale)
 - `transaction_id` (facoltativo)
 - `partner_id` (facoltativo)
-- Effetto: aggiorna la prenotazione LatePoint con `status = payment_success_status` (default `pending`) e `payment_status = paid`, logga `PAYMENT_CALLBACK_OK`.
+- Effetto: il sito `main` aggiorna la prenotazione LatePoint lato centrale con `status = payment_success_status` (default `pending`) e `payment_status = paid`, logga `PAYMENT_CALLBACK_OK`.
+
+### Comportamento reale verificato
+- La callback aggiorna il booking sul sito `main`, non sul sito partner.
+- Lo stato finale effettivamente applicato dipende principalmente da `payment_success_status` salvato nelle impostazioni del main.
+- Il valore `status` nel payload partner può essere presente ma non sostituisce automaticamente la configurazione locale del main.
+- Il corretto funzionamento dipende fortemente dall’allineamento tra ambiente, base URL, slug callback e secret HMAC: una configurazione errata può mischiare staging e produzione o colpire l’endpoint sbagliato.
 
 ## Tracciamento partner nei booking
 - Durante la creazione prenotazione vengono scritti i meta LatePoint `partner_id` e `partner_location_id` con il valore del partner e della posizione LatePoint corrente.

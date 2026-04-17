@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <title>Test Direct Partner Login</title>
+</head>
+<body>
+  <form id="partnerLoginForm" method="POST" action="https://staging.sosmedico.org/partner-login/">
+    <input type="hidden" name="partner_id" value="stgfake">
+    <input type="hidden" name="payload" value="utente3@testolo3.com">
+    <input type="hidden" name="timestamp" value="1776393460">
+    <input type="hidden" name="nonce" value="8fkozhha97">
+    <input type="hidden" name="signature" value="MEUCIFYBufZ43faZgm1xmugIOPChKFM1egd/udYqNxyS/hIBAiEAy3j2sRQiy3DOZ8C+CPQ8KahOrIJRZq5w901zxobYJP0=">
+  </form>
+
+  <script>
+    document.getElementById('partnerLoginForm').submit();
+  </script>
+</body>
+</html>

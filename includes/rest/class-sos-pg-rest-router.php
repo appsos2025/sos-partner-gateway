@@ -470,6 +470,7 @@ class SOS_PG_REST_Router {
 
         // Handoff payload per redirect verso il login/flow esistente.
         $email = (string) $identity['identity']['email'];
+        $this->plugin->stash_partner_identity_context($partner_id, (array) ($identity['identity'] ?? []));
         $timestamp = time();
         $nonce = wp_generate_password(12, false, false);
         $message = $partner_id . '|' . $email . '|' . $timestamp . '|' . $nonce;

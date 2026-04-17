@@ -101,7 +101,7 @@ Il flusso di base. Un utente autenticato sul sito centrale viene reindirizzato a
 
 ### `embedded_booking` — Embedded booking
 
-Il modulo di prenotazione di LatePoint (presente sul sito centrale) viene incorporato all'interno di una pagina del sito partner tramite shortcode o iframe. Il sito partner trasmette il contesto utente al centrale tramite un token firmato.
+Il modulo di prenotazione di (presente sul sito centrale) viene incorporato all'interno di una pagina del sito partner tramite shortcode o iframe. Il sito partner trasmette il contesto utente al centrale tramite un token firmato.
 
 **Quando usarla:** il sito partner vuole mostrare il sistema di prenotazione del centrale nella propria interfaccia, senza che l'utente debba navigare sul sito centrale.
 

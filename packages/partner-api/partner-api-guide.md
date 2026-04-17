@@ -1,296 +1,226 @@
-# Guida integrazione esterna — SOS Partner Gateway API
+# Guida integrazione server-to-server — Family+Happy → SOS
 
-Questo documento è rivolto a sviluppatori che devono integrare un sistema custom (non WordPress) con il sito centrale SOS Partner Gateway.
+Questa guida descrive il flusso partner-facing attualmente allineato con il comportamento live del sistema SOS.
 
----
+L’integrazione per Family+Happy è composta da tre passaggi:
 
-## Panoramica
-
-Il sito centrale SOS espone endpoint REST e un endpoint non-REST per i seguenti scenari di integrazione:
-
-1. **Handoff login**: il sistema partner ottiene un token di sessione per un utente autenticato e lo invia al sito centrale per creare una sessione riconosciuta.
-2. **Payment callback**: il sistema partner notifica al sito centrale la conferma di un pagamento.
-3. **Embedded booking** (principalmente WordPress): il sistema partner incorpora il modulo di prenotazione del sito centrale tramite un token firmato con chiave ECC.
-
-I flussi **handoff** e **payment callback** sono i più comuni per integrazioni custom.
+1. **Preparazione server-side del payload firmato** da parte di Family+Happy.
+2. **Browser POST diretto** verso il percorso di login dedicato di SOS.
+3. **Payment callback opzionale** dal server Family+Happy verso SOS dopo il pagamento.
 
 ---
 
-## Autenticazione
+## 1. Overview
 
-Ogni richiesta verso il sito centrale deve includere i seguenti header:
+### Flusso operativo
 
-| Header | Valore | Note |
+1. Il backend Family+Happy prepara i campi necessari per il login partner.
+2. Family+Happy firma lato server il messaggio composto da partner_id, email, timestamp e nonce.
+3. Il browser dell’utente esegue un **POST diretto** verso il percorso di login SOS.
+4. SOS verifica la firma PEM, valida timestamp e nonce, crea o recupera l’utente WordPress, imposta il contesto partner e reindirizza l’utente alla pagina corretta.
+5. Se Family+Happy gestisce il pagamento lato proprio sistema, può poi inviare una **callback firmata** a SOS per confermare il pagamento.
+
+> Nel flusso Family+Happy attuale non è richiesto alcun passaggio preliminare verso l’endpoint embedded booking.
+
+---
+
+## 2. Direct partner-login endpoint
+
+### Endpoint live
+
+```http
+POST {central_base_url}/partner-login/
+```
+
+### Campi richiesti
+
+| Campo | Obbligatorio | Note |
 |---|---|---|
-| `X-SOS-Partner-ID` | Partner ID univoco | Formato: `[A-Za-z0-9_-]{1,64}` |
-| `X-SOS-Partner-Token` | Shared secret | Valore condiviso con l'amministratore centrale |
+| `partner_id` | Sì | Identificativo partner configurato su SOS |
+| `payload` | Sì | Email dell’utente |
+| `timestamp` | Sì | Timestamp Unix corrente |
+| `nonce` | Sì | Valore univoco per prevenire replay |
+| `signature` | Sì | Firma Base64 del messaggio firmato lato partner |
+| `return_url` | No | URL di ritorno partner, se usato nel flusso browser |
+| `opener_origin` | No | Origine del portale partner, se utile nel flusso popup |
+| `sos_pg_flow_context` | No | Contesto opzionale del flusso browser |
 
-Questi header identificano il partner e sono richiesti su tutti gli endpoint soggetti a context check.
+### Messaggio da firmare
 
-> **Nota:** il sito centrale non usa OAuth o API key nel senso tradizionale. L'autenticazione avviene tramite context check: il sito centrale verifica che la richiesta provenga da un path riconosciuto come partner.
+Il messaggio da firmare deve essere esattamente:
 
----
-
-## Endpoint disponibili
-
-### Health check
-
+```text
+partner_id|email|timestamp|nonce
 ```
-GET {central_base_url}/wp-json/sos-pg/v1/health
-```
 
-Verifica la raggiungibilità del sito centrale. Restituisce un payload di sistema se il contesto è valido.
+La firma deve essere prodotta lato server Family+Happy con la chiave privata partner e inviata nel campo `signature` in formato Base64.
 
-**Risposta 200 (OK):**
+### Esempio campi da inviare
+
 ```json
 {
-  "ok": true,
-  ...
+  "partner_id": "family_happy",
+  "payload": "maria.rossi@example.com",
+  "timestamp": 1776410100,
+  "nonce": "aB12Cd34Ef56",
+  "signature": "BASE64_SIGNATURE"
 }
 ```
 
-**Risposta 403:** contesto partner non riconosciuto.
+### Esiti principali
+
+| HTTP | Significato |
+|---|---|
+| `302` | Login accettato e redirect verso la pagina partner |
+| `400` | Partner, email, nonce o firma mancanti/non validi |
+| `403` | Timestamp scaduto, firma non valida o replay nonce |
+| `404` | Pagina/route partner non configurata |
+| `429` | Rate limit temporaneo per IP |
 
 ---
 
-### Handoff login — Issue token
+## 3. Browser POST diretto
 
-```
-GET {central_base_url}/wp-json/sos-pg/v1/handoff/{partner_id}
-```
+Il browser dell’utente deve inviare direttamente il form verso il login partner di SOS con i valori firmati dal backend Family+Happy.
 
-Richiede un token di handoff per un utente autenticato sul sito centrale. Questo endpoint è chiamato **dal sito centrale**, tipicamente dopo che un utente ha effettuato il login, per generare un token da passare al sito partner.
+### Esempio minimo di browser POST
 
-**Requisiti:**
-- L'utente deve essere autenticato sul sito centrale (sessione WordPress attiva).
-- Il `partner_id` nel path deve corrispondere a un partner abilitato nel registry del centrale.
-
-**Risposta 200 (OK):**
-```json
-{
-  "ok": true,
-  "partner_id": "acme_clinic",
-  "token": "<token_opaco>",
-  "expires_at": 1712345678
-}
+```html
+<form id="sos-handoff-form" method="post" action="https://central.example.com/partner-login/">
+  <input type="hidden" name="partner_id" value="family_happy">
+  <input type="hidden" name="payload" value="maria.rossi@example.com">
+  <input type="hidden" name="timestamp" value="1776410100">
+  <input type="hidden" name="nonce" value="aB12Cd34Ef56">
+  <input type="hidden" name="signature" value="BASE64_SIGNATURE">
+</form>
+<script>
+  document.getElementById('sos-handoff-form').submit();
+</script>
 ```
 
-**Risposta 403 `sos_pg_handoff_forbidden`:** utente non autenticato.
-**Risposta 404:** partner non trovato o non abilitato.
-
-> **Nota:** il token ha una scadenza breve (default 300 secondi). Va consumato immediatamente.
+> I campi devono essere costruiti e firmati lato server Family+Happy. Il browser deve solo inviare il POST verso SOS.
 
 ---
 
-### Handoff login — Verify token
+## 4. Security
 
-```
-GET {central_base_url}/wp-json/sos-pg/v1/handoff/verify?token={token}
-```
+Questa sezione riporta solo i controlli attualmente effettivi nel runtime.
 
-Oppure tramite header:
+### Partner login diretto
 
-```
-Authorization: Bearer {token}
-```
+- `partner_id` deve essere presente e valido
+- `payload` deve contenere una email valida
+- il `timestamp` viene validato con una finestra di **120 secondi**
+- il `nonce` è obbligatorio
+- esiste protezione contro il replay del `nonce`
+- la `signature` viene verificata con la chiave pubblica PEM configurata per il partner
+- se timestamp, nonce o signature non sono validi, il login viene rifiutato
+### Payment callback
 
-Verifica un token di handoff precedentemente emesso. Questo endpoint è chiamato **dal sito partner** per validare il token ricevuto e ottenere i dati utente.
-
-**Risposta 200 (OK):**
-```json
-{
-  "ok": true,
-  "user_id": 42,
-  "email": "utente@example.com",
-  "partner_id": "acme_clinic",
-  "expires_at": 1712345678
-}
-```
-
-**Risposta 401:** token mancante, non valido o scaduto.
+- la firma usa **HMAC-SHA256** sul **corpo JSON grezzo esatto** della richiesta
+- l’header da inviare è **X-SOSPG-Signature**
+- la risoluzione del secret di callback è **partner-specific first**, con fallback al secret globale solo se necessario
 
 ---
 
-### Partner lookup
+## 5. Payment callback
 
-```
-GET {central_base_url}/wp-json/sos-pg/v1/partners/{partner_id}
-```
+### Endpoint
 
-Recupera le informazioni pubbliche di un partner registrato come `external_api`.
-
-**Risposta 200 (OK):**
-```json
-{
-  "ok": true,
-  "partner_id": "acme_clinic",
-  "type": "external_api",
-  "enabled": true,
-  "api_base_url": "https://partner.example.com"
-}
+```http
+POST {configured_callback_url}
 ```
 
-**Risposta 404:** partner non trovato o non di tipo `external_api`.
+L’URL esatto del callback viene concordato con SOS. Se non personalizzato, il percorso standard è generalmente:
 
----
-
-### Session check
-
+```http
+{central_base_url}/partner-payment-callback/
 ```
-GET {central_base_url}/wp-json/sos-pg/v1/session
-```
-
-Verifica se l'utente corrente è autenticato sul sito centrale e restituisce i dati di sessione.
-
-**Risposta 200 (utente autenticato):**
-```json
-{
-  "logged_in": true,
-  "user_id": 42,
-  "email": "utente@example.com",
-  "partner_id": "acme_clinic"
-}
-```
-
-**Risposta 200 (utente non autenticato):**
-```json
-{
-  "logged_in": false
-}
-```
-
----
-
-## Payment callback
-
-```
-POST {central_base_url}/{payment_callback_slug}
-```
-
-Dove `payment_callback_slug` è il valore configurato nelle impostazioni del plugin centrale (default: `partner-payment-callback`).
-
-> **Attenzione:** questo endpoint **non è una route REST** (`/wp-json/`). È gestito dall'hook `init` del plugin su un path WordPress personalizzato.
 
 ### Header richiesti
 
 | Header | Valore |
 |---|---|
 | `Content-Type` | `application/json` |
-| `X-SOSPG-Signature` | `hash_hmac('sha256', body_json, payment_callback_secret)` |
+| `X-SOSPG-Signature` | HMAC-SHA256 del body JSON grezzo |
 
-### Payload
+### Regola firma
+
+```text
+signature = HMAC_SHA256(raw_json_body, callback_secret)
+```
+
+Il body deve essere firmato nella sua forma esatta, senza riordinare o rigenerare i campi tra firma e invio.
+
+### Payload allineato al runtime
+
+| Campo | Obbligatorio | Note |
+|---|---|---|
+| `booking_id` | Sì | Identificativo prenotazione su SOS |
+| `transaction_id` | Sì | Identificativo univoco della transazione partner |
+| `partner_id` | Sì | Deve corrispondere al partner associato alla prenotazione |
+| `amount_paid` | No | Importo pagato |
+| `currency` | No | Valuta |
+| `payment_provider` | No | Provider di pagamento |
+| `external_reference` | No | Riferimento esterno partner o gateway |
+| `email` | No | Email del pagante |
+
+### Esempio callback
 
 ```json
 {
   "booking_id": 1234,
-  "transaction_id": "txn_abc123",
-  "partner_id": "acme_clinic",
-  "amount_paid": 150.00,
+  "transaction_id": "fh_txn_20260417_001",
+  "partner_id": "family_happy",
+  "amount_paid": 150.0,
   "currency": "EUR",
-  "payment_provider": "stripe",
-  "external_reference": "pi_xxx",
-  "email": "utente@example.com"
+  "payment_provider": "family_happy_pay",
+  "external_reference": "FH-PAY-20260417-001",
+  "email": "maria.rossi@example.com"
 }
 ```
 
-| Campo | Tipo | Obbligatorio | Descrizione |
-|---|---|---|---|
-| `booking_id` | int | Sì | ID della prenotazione LatePoint sul sito centrale |
-| `transaction_id` | string | Sì | ID transazione univoco del gateway di pagamento partner |
-| `partner_id` | string | Sì | Deve corrispondere al partner registrato per quella prenotazione |
-| `amount_paid` | float | No | Importo pagato |
-| `currency` | string | No | Codice valuta (es. `EUR`) |
-| `payment_provider` | string | No | Nome del gateway usato (es. `stripe`, `paypal`) |
-| `external_reference` | string | No | Riferimento aggiuntivo del gateway |
-| `email` | string | No | Email dell'utente pagante |
+### Esiti principali
 
-### Come calcolare la firma HMAC
-
-```
-signature = hash_hmac('sha256', json_body, shared_secret)
-```
-
-Header da includere nella richiesta:
-
-```
-X-SOSPG-Signature: {signature}
-```
-
-**Regole importanti:**
-
-- `json_body` è la stringa JSON esatta inviata nel body della richiesta — non re-serializzata, non riordinata.
-- `shared_secret` è il `payment_callback_secret` configurato sul plugin centrale (stesso valore inserito nel campo **Shared secret** del plugin partner).
-- La firma è calcolata sull'intero body come stringa grezza, prima di inviare la richiesta.
-- Il sito centrale confronta la firma con `hash_equals()` per prevenire timing attacks.
-
-**Esempio PHP:**
-
-```php
-$body = json_encode($payload); // genera la stringa JSON
-$signature = hash_hmac('sha256', $body, $shared_secret);
-
-// Inviare nella richiesta:
-// Content-Type: application/json
-// X-SOSPG-Signature: {$signature}
-// Body: {$body}
-```
-
-**Esempio Node.js:**
-
-```js
-const crypto = require('crypto');
-const body = JSON.stringify(payload);
-const signature = crypto.createHmac('sha256', sharedSecret).update(body).digest('hex');
-```
-
-Dove `raw_body_string` è il corpo JSON esatto inviato nella richiesta (stessa stringa, non re-encodata). Il secret deve coincidere con il `payment_callback_secret` configurato sul plugin centrale.
-
-### Risposte
-
-| HTTP | Body | Significato |
-|---|---|---|
-| `200` | `OK` | Callback elaborato con successo |
-| `400` | `Payload non valido` | Body non è JSON valido |
-| `400` | `Dati mancanti` | `booking_id`, `partner_id` o `transaction_id` mancanti o vuoti |
-| `401` | `Firma non valida` | HMAC non corrisponde |
-| `403` | `Contesto partner non valido` | Path non riconosciuto come endpoint callback |
-| `403` | `Callback non attivato` | `payment_callback_secret` vuoto sul plugin centrale |
-| `403` | `Partner mismatch per booking` | Il `partner_id` del payload non corrisponde al partner della prenotazione |
-| `404` | `Prenotazione non trovata` | Il `booking_id` non esiste nel DB del centrale |
-
----
-
-## Embedded booking (cenni)
-
-Il flusso embedded booking si basa su un token firmato con **chiave privata ECC (EC P-256)**. Il sito partner deve avere una coppia di chiavi configurata nel registry del plugin centrale:
-
-- La **chiave pubblica** è depositata nel plugin centrale (campo `public_key_pem` per quel partner).
-- La **chiave privata** è usata dal sito partner per firmare i token. Deve essere mantenuta sicura e non deve mai essere trasmessa al sito centrale.
-
-Questo flusso è principalmente destinato a siti WordPress che usano il plugin SOS Partner Bridge Lite. Per integrazioni custom, contattare l'amministratore centrale per la documentazione tecnica specifica.
-
----
-
-## Errori tipici
-
-| Sintomo | Causa probabile |
+| HTTP | Significato |
 |---|---|
-| 403 su qualsiasi endpoint REST | Context check fallito: partner ID non riconosciuto, o l'IP/referer non è in un contesto partner valido |
-| 401 sul callback | Il secret usato per l'HMAC non corrisponde a quello configurato sul centrale |
-| 404 su `/wp-json/sos-pg/v1/...` | Il plugin SOS Gateway non è attivo sul sito centrale |
-| 404 su `/{slug}` | Lo slug del callback è diverso da quello configurato, o il plugin non è attivo |
-| Token scaduto (handoff) | Il token ha TTL di 300 secondi: va consumato immediatamente dopo l'emissione |
-| `sos_pg_handoff_invalid` | Token malformato, già usato o firmato con secret errato |
+| `200` | Callback elaborato con successo |
+| `400` | Payload non valido o dati obbligatori mancanti |
+| `401` | Firma non valida |
+| `403` | Callback non attivato oppure partner non coerente con la prenotazione |
+| `404` | Prenotazione non trovata |
+| `409` | Transazione duplicata o conflitto su prenotazione già chiusa |
 
 ---
 
-## Checklist sicurezza
+## 6. Identity fields
 
-- [ ] Il `payment_callback_secret` è generato casualmente (min 32 caratteri), non è una password memorabile
-- [ ] Il `payment_callback_secret` non è mai esposto lato client o in log pubblici
-- [ ] La firma HMAC è calcolata sul body raw della richiesta, non su una sua re-serializzazione
-- [ ] Il `booking_id` è verificato come appartenente al partner prima di elaborare il callback
-- [ ] I token di handoff vengono consumati immediatamente e non memorizzati
-- [ ] La chiave privata ECC (per embedded booking) è custodita su file system con permessi restrittivi, mai nel DB
-- [ ] Le chiamate verso il sito centrale avvengono server-to-server, non dal browser dell'utente
-- [ ] Il sito centrale è raggiungibile solo via HTTPS
+Nel flusso Family+Happy → SOS:
+
+- `email` è obbligatoria
+- per questo partner il flusso operativo usa solo l’email come identità richiesta
+- `first_name`, `last_name`, `phone` e `name` non sono necessari nel flusso diretto verso il login partner
+
+SOS non esegue sincronizzazioni dirette di un’anagrafica esterna durante il login browser.
+
+---
+
+## 7. Note operative
+
+- usare sempre HTTPS
+- generare timestamp, nonce e signature solo lato server Family+Happy
+- usare il browser solo per il POST diretto verso `/partner-login/`
+- conservare la chiave privata e il callback secret solo lato server
+- non loggare i secret in chiaro
+
+---
+
+## 8. Checklist finale
+
+- [ ] `partner_id` concordato e attivo su SOS
+- [ ] chiave pubblica PEM del partner configurata e verificata su SOS
+- [ ] firma server-side del messaggio `partner_id|email|timestamp|nonce` testata con successo
+- [ ] browser POST diretto verso `/partner-login/` testato con successo
+- [ ] callback secret ricevuto e custodito lato server
+- [ ] payment callback testata con firma HMAC valida
+- [ ] richieste eseguite solo via HTTPS

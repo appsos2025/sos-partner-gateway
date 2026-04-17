@@ -19,22 +19,26 @@ I due siti comunicano tramite chiamate HTTP server-to-server.
 
 ## Flussi principali (diagramma testuale)
 
-### Flusso handoff login
+### Flusso partner esterno confermato
 
 ```
 Utente                Sito partner            Sito centrale
   |                       |                        |
-  |--- login ------------>|                        |
-  |                       |--- GET /handoff/{id} ->|  (con X-SOS-Partner-ID + Token)
-  |                       |                        |-- verifica utente autenticato
-  |                       |                        |-- emette token (TTL 300s)
-  |                       |<-- { token, expires } -|
-  |<-- redirect + token --|                        |
-  |--- GET /verify?token->|--- GET /handoff/verify->|  (token nel query string o Bearer)
-  |                       |                        |-- verifica firma + scadenza
-  |                       |<-- { user_id, email } -|
-  |<-- sessione creata ----|                        |
+  |--- avvio -----------> |                        |
+  |                       |-- firma server-side -->|  (partner_id|email|timestamp|nonce)
+  |                       |                        |
+  |--- POST /partner-login/ ---------------------->|  (browser POST diretto)
+  |                       |                        |-- verifica PEM partner
+  |                       |                        |-- verifica timestamp 120s
+  |                       |                        |-- verifica nonce replay
+  |                       |                        |-- crea/recupera utente WP
+  |                       |                        |-- salva partner context
+  |<-- redirect pagina partner -------------------|
 ```
+
+### Flussi REST handoff token
+
+Le route `/handoff/{partner_id}` e `/handoff/verify` esistono ancora come flusso secondario/compatibilità, ma non rappresentano il percorso partner principale confermato per Family+Happy.
 
 ### Flusso payment callback
 
@@ -52,16 +56,18 @@ Utente                Sito partner            Sito centrale
   |<-- conferma ----------|
 ```
 
-### Flusso embedded booking (cenni)
+### Flusso embedded booking (opzionale/interno)
 
 ```
 Sito partner                              Sito centrale
     |                                          |
-    |-- firma token con chiave privata ECC --->|
-    |                                          |-- verifica con chiave pubblica ECC del partner
-    |                                          |-- restituisce sessione booking
-    |<-- HTML/JS modulo prenotazione ----------|
+    |-- POST /embedded-booking/create -------->|
+    |                                          |-- valida token strategy configurata
+    |                                          |-- opzionalmente prepara contesto booking
+    |<-- risposta handoff / dati booking ------|
 ```
+
+Questo flusso resta disponibile per casi embedded, ma non è richiesto per il partner flow Family+Happy confermato in produzione.
 
 ---
 
@@ -164,7 +170,7 @@ Questo garantisce retrocompatibilità senza migrazione forzata dei dati storici.
 | GET | `/handoff/{partner_id}` | `handle_handoff_issue` | public + context check + user login |
 | GET | `/embedded-booking/debug/{partner_id}` | `handle_embedded_booking_debug` | `manage_options` |
 | GET | `/embedded-booking/verify/{partner_id}` | `handle_embedded_booking_verify` | `manage_options` |
-| POST | `/embedded-booking/create` | `handle_embedded_booking_create` | public + context check |
+| POST | `/embedded-booking/create` | `handle_embedded_booking_create` | public + context check — opzionale/interno, non main flow Family+Happy |
 
 **Context check (`ensure_partner_rest_context`):** tutte le route pubbliche verificano che la richiesta provenga da un contesto partner riconosciuto (URL, cookie, referer, o header). Richieste da contesti sconosciuti ricevono HTTP 403.
 

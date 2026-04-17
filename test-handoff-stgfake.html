@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <title>Test Handoff STGFAKE</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 24px;
+      background: #f6f7f9;
+      color: #222;
+    }
+    h1 {
+      margin-bottom: 12px;
+    }
+    textarea {
+      width: 100%;
+      height: 420px;
+      box-sizing: border-box;
+      font-family: Consolas, monospace;
+      font-size: 13px;
+      padding: 12px;
+    }
+    .row {
+      margin-top: 14px;
+    }
+    button {
+      padding: 10px 16px;
+      cursor: pointer;
+    }
+    .small {
+      color: #666;
+      font-size: 13px;
+      margin-bottom: 12px;
+    }
+    .box {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    pre {
+      background: #f1f3f5;
+      padding: 12px;
+      border-radius: 8px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Test Handoff STGFAKE</h1>
+
+  <div class="box">
+    <div class="small">
+      Incolla qui sotto la risposta JSON completa di Postman ottenuta da:
+      <br>
+      <code>POST https://staging.sosmedico.org/wp-json/sos-pg/v1/embedded-booking/create</code>
+    </div>
+
+    <textarea id="jsonInput" placeholder="Incolla qui il JSON completo..."></textarea>
+
+    <div class="row">
+      <button onclick="startHandoff()">Avvia Handoff</button>
+      <button onclick="loadExample()">Carica esempio</button>
+      <button onclick="clearBox()">Pulisci</button>
+    </div>
+  </div>
+
+  <div class="box">
+    <strong>Debug parser</strong>
+    <pre id="debugBox">Nessun dato ancora elaborato.</pre>
+  </div>
+
+  <script>
+    function clearBox() {
+      document.getElementById('jsonInput').value = '';
+      document.getElementById('debugBox').textContent = 'Nessun dato ancora elaborato.';
+    }
+
+    function loadExample() {
+      document.getElementById('jsonInput').value = JSON.stringify({
+        "success": true,
+        "partner_id": "stgfake",
+        "redirect_url": "https://staging.sosmedico.org/partner-login/",
+        "handoff": {
+          "partner_id": "stgfake",
+          "payload": "utente@test.com",
+          "timestamp": 1776354955,
+          "nonce": "MkJN43c4PZWX",
+          "signature": "MEYCIQDj668hcg1grJtDU2qFjtrno9l/Xo+UFPEdRcOjgCxefQIhAKQOa8ppn7PnY0fmw5hUxu5mROsxooSa3leR8zayOwEy"
+        }
+      }, null, 2);
+    }
+
+    function startHandoff() {
+      try {
+        const raw = document.getElementById('jsonInput').value.trim();
+        if (!raw) {
+          alert('Incolla prima la risposta JSON di Postman.');
+          return;
+        }
+
+        const data = JSON.parse(raw);
+
+        if (!data || typeof data !== 'object') {
+          alert('JSON valido ma struttura non corretta.');
+          return;
+        }
+
+        if (!data.redirect_url) {
+          alert('Campo redirect_url mancante.');
+          return;
+        }
+
+        if (!data.handoff || typeof data.handoff !== 'object') {
+          alert('Oggetto handoff mancante.');
+          return;
+        }
+
+        const requiredFields = ['partner_id', 'payload', 'timestamp', 'nonce', 'signature'];
+        const missing = requiredFields.filter(field => !(field in data.handoff));
+
+        if (missing.length > 0) {
+          alert('Campi handoff mancanti: ' + missing.join(', '));
+          return;
+        }
+
+        document.getElementById('debugBox').textContent = JSON.stringify({
+          redirect_url: data.redirect_url,
+          handoff: data.handoff
+        }, null, 2);
+
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = data.redirect_url;
+        form.style.display = 'none';
+
+        requiredFields.forEach((key) => {
+          const input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = key;
+          input.value = String(data.handoff[key]);
+          form.appendChild(input);
+        });
+
+        document.body.appendChild(form);
+        form.submit();
+
+      } catch (e) {
+        alert('JSON non valido: ' + e.message);
+      }
+    }
+  </script>
+
+</body>
+</html>
